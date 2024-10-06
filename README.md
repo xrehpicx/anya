@@ -1,8 +1,8 @@
-# anya
+# Anya.
 
 cheaper jarvis
 
-**Disclaimer: This project is in no way intended for production use. It is an experimental project that I have made for myself to see how far I can push LLM models to manage my tools for me. A lot of the code does not follow standard best practices as my priority was experimentation rather than production readiness. Over time, I plan to slowly refine this project, making it better and easier for others to use and contribute.**
+**Disclaimer: This project is in no way intended for production use. It is an experimental project that I have made for myself to see how far I can push LLM models to manage my tools for me. A lot of the code does not follow standard best practices as my priority was experimentation rather than production readiness. Over time, I plan to slowly refine this project, making it better and easier for others to use and contribute. For this public release, I've tried to make as many tools as I could configurable, but by the project's nature, not every tool yet is fully configurable from the `.env`.**
 
 Current Abilities:
 
