@@ -69,7 +69,10 @@ Ensure responses do not exceed 1500 characters.
     },
   ];
 
-  const events = return_current_events().map((event) => event.eventId);
+  const events = return_current_events().map((event) => ({
+    id: event.eventId,
+    desc: event.description,
+  }));
   const creator_system_messages: OpenAI.ChatCompletionSystemMessageParam[] = [
     {
       role: "system",
