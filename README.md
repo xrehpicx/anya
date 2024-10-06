@@ -12,6 +12,7 @@ Current Abilities:
 - Support for external events to trigger anya to execute any given instruction.
 - Support a schedule to trigger anya to execute any given instruction.
 - Can store memories for certain tasks.
+- Can understand voice notes (warning: this currently uses openai hosted whisper which is unnecessarily expensive, so do not use this if you are more than one person using this)
 
 Current Tools & Managers:
 
