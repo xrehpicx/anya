@@ -2,6 +2,8 @@
 
 cheaper jarvis
 
+**Disclaimer: This project is in no way intended for production use. It is an experimental project that I have made for myself to see how far I can push LLM models to manage my tools for me. A lot of the code does not follow standard best practices as my priority was experimentation rather than production readiness. Over time, I plan to slowly refine this project, making it better and easier for others to use and contribute.**
+
 Current Abilities:
 
 - Multi user support.
@@ -45,6 +47,7 @@ Current Tools & Managers:
 - Reminder Manager (Uses CALDAV):
   - CRUD on Reminders: Manage reminders for a user.
 - Scraper (currently disabled): Can scrape a given website for a given query.
+- Services Status: Can check the status of a given service.
 - Youtube Tools:
   - Summerization: Can summerize a youtube video.
   - Searching in Video: Can search for a query in a youtube video.
