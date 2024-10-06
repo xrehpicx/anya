@@ -24,7 +24,8 @@ Current Tools & Managers:
 - Communications Manager
   - Send Email: Can send an email to a user.
   - Send Message: Can send a message to a user. (supported platforms: discord, whatsapp)
-- Docker Container Shell: Can execute shell commands in an isolated docker container.
+- Docker Container Shell: Can execute shell commands in an isolated docker container. This requires /tmp to be mounted to the container as this is how it can share files with the host to then share files with the user.
+- Local Code interpreter: Can execute code in python in the above docker container, this allows for the model to install any dependencies it needs.
 - Events Manager
   - CRUD on Events: Setup events that can be listened to. (webhook based, need a one time manual setup for each event).
   - CRUD on Event Listeners: Setup event listeners that can call anya with a given instruction. once that event is triggered.
@@ -46,7 +47,7 @@ Current Tools & Managers:
   - Search: Can search through for events since the beginning of all tracking.
 - Reminder Manager (Uses CALDAV):
   - CRUD on Reminders: Manage reminders for a user.
-- Scraper (currently disabled): Can scrape a given website for a given query.
+- Scraper (currently disabled, but still can use the shell env or code interpreter to scrape): Can scrape a given website for a given query.
 - Services Status: Can check the status of a given service.
 - Youtube Tools:
   - Summerization: Can summerize a youtube video.
