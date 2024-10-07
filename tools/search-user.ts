@@ -20,6 +20,7 @@ export async function search_user(
   context_message: Message
 ) {
   try {
+    console.log(JSON.stringify(userConfigs));
     const res = await ask({
       prompt: `You are a Search Tool that takes in a name and platform and returns the user's details. You are searching for ${name} on ${platform}.
       

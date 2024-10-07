@@ -13,7 +13,7 @@ interface PlatformIdentity {
 export interface UserConfig {
   name: string;
   identities: PlatformIdentity[];
-  relatives?: {
+  friends?: {
     related_as: string[];
     user: UserConfig;
   }[];
@@ -30,7 +30,7 @@ const UserConfigSchema: z.ZodType<UserConfig> = z.lazy(() =>
   z.object({
     name: z.string(),
     identities: z.array(PlatformIdentitySchema),
-    relatives: z
+    friends: z
       .array(
         z.object({
           related_as: z.array(z.string()),

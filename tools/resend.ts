@@ -31,6 +31,7 @@ export async function send_email({ to, subject, html }: ResendParams) {
       from: "anya@tri.raj.how",
       to,
       subject,
+      replyTo: "anya@raj.how",
       html:
         (await formatToHtml({
           to,
@@ -211,7 +212,7 @@ async function formatToHtml({
     1. Vercel Invite Template:
     ${vercel_invite_template}
     
-    2. Stripe Welcome Template:
+    2. Stripe Welcome Template (use this for most simple messages):
     ${stripe_welcome_template}
 
     3. Linear Login Code Template:
@@ -219,6 +220,7 @@ async function formatToHtml({
 
     Pick a template and put the data in it to create the final HTML string.
     Do not Make up false data, use only the given data.
+    Make sure to replace all the example data in the template with data relavent to the context.
     
     RETURN ONLY HTML STRING
     `,
