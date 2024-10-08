@@ -412,7 +412,7 @@ export async function linkManager(
 Your job is to understand the user's request and manage links, tags, or collections using the available tools.
 
 ----
-${memory_manager_guide("links_manager")}
+${memory_manager_guide("links_manager", context_message.author.id)}
 ----
     `,
     message: request,

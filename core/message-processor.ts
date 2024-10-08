@@ -19,7 +19,7 @@ interface MessageQueueEntry {
 
 export class MessageProcessor {
   private openai: OpenAI;
-  private model: string = "gpt-4o-mini";
+  private model: string = "gpt-4o";
   private messageQueue: Map<string, MessageQueueEntry> = new Map();
   private toolsCallMap: Map<string, OpenAI.Chat.ChatCompletionMessageParam[]> =
     new Map();

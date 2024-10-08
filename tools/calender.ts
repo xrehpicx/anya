@@ -534,7 +534,7 @@ Use correct ISO 8601 time formats. Provide feedback about actions taken, includi
 User's primary emails: r@raj.how and raj@cloud.raj.how. Inform the user of the date of any created or updated event.
 
 ----
-${memory_manager_guide("calendar_manager")}
+${memory_manager_guide("calendar_manager", context_message.author.id)}
 ----
 
 Current Time: ${new Date().toISOString()}

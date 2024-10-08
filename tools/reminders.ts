@@ -563,7 +563,7 @@ export async function remindersManager(
 Your job is to understand the user's request (e.g., create, update, delete, list reminders) and handle it using the available tools. Use the correct ISO 8601 time format for reminders and provide feedback about the specific action taken.
 
 ----
-${memory_manager_guide("reminders_manager")}
+${memory_manager_guide("reminders_manager", context_message.author.id)}
 ----
 
 Current Time: ${currentTime.toISOString()}

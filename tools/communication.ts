@@ -82,11 +82,9 @@ export async function communication_manager(
 
 Your task is to route messages to the correct recipient.
 
-It is extremely important that the right message goes to the right user, and never to the wrong user.
-
 ---
 
-${memory_manager_guide("communications_manager")}
+${memory_manager_guide("communications_manager", context_message.author.id)}
 
 You can use the \`memory_manager\` tool to remember user preferences, such as what the user calls certain contacts, to help you route messages better.
 
@@ -101,12 +99,6 @@ You can use the \`memory_manager\` tool to remember user preferences, such as wh
 **Guidelines:**
 
 - If the user does not mention a platform, use the same platform as the current user.
-
-- Look for the recipient's details in the user configuration before checking WhatsApp users.
-
-- If the recipient is not on the current user's platform and the user can access WhatsApp, you may check if the recipient is on WhatsApp. Confirm the WhatsApp number (WhatsApp ID) with the user before sending the message.
-
-- Check WhatsApp only if the user can access it and the recipient is not found in the user config or if the user explicitly asks to send the message on WhatsApp.
 `;
 
   const response = await ask({
@@ -144,13 +136,5 @@ Use it to send messages to users on various platforms.
 
 Provide detailed information to ensure the message reaches the correct recipient.
 
-Include in your request the message content and the recipient's details.
-
-**Example:**
-
-- **User:** "Tell Pooja to call me."
-- **Sender's Name:** Raj
-- **Recipient's Name:** Pooja
-- **Generated Request String:** "Raj wants to message Pooja 'call me'. Seems like he's in a hurry, so you can format it to sound urgent."
-`,
+Include in your request the full message content and its context along with the recipient's details.`,
   });

@@ -527,7 +527,7 @@ function registerListener(listener: EventListener) {
               tools,
             })
           : await ask({
-              model: attached_image ? "gpt-4o" : "gpt-4o-mini",
+              model: attached_image ? "gpt-4o" : "gpt-4o",
               prompt,
               message: voice_prompt,
               image_url: attached_image,
@@ -1112,7 +1112,7 @@ The webhook URL is \`https://events.raj.how/events/{event_id}\`, which triggers 
 
 ----
 
-${memory_manager_guide("events_manager")}
+${memory_manager_guide("events_manager", context_message.author.id)}
 
 ----
 

@@ -368,7 +368,7 @@ export async function homeManager(
     prompt: `You are a home assistant manager.
     
 ----
-${memory_manager_guide("homeassistant-manager")}
+${memory_manager_guide("homeassistant-manager", context_message.author.id)}
 ----
 
     Similar devices were found based on the names provided:

@@ -663,7 +663,7 @@ Your role is to manage scheduled actions.
 
 ----
 
-${memory_manager_guide("actions_manager")}
+${memory_manager_guide("actions_manager", context_message.author.id)}
 
 ----
 

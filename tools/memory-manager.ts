@@ -28,13 +28,16 @@ export type DeleteMemory = z.infer<typeof DeleteMemorySchema>;
 const memory_path = pathInDataDir("memories.json");
 
 type Memories = Record<
-  string,
-  {
-    id: string;
-    memory: string;
-    created_at: string;
-    updated_at: string;
-  }[]
+  string, // manager_id
+  Record<
+    string, // user_id
+    {
+      id: string;
+      memory: string;
+      created_at: string;
+      updated_at: string;
+    }[]
+  >
 >;
 
 // if the file doesn't exist, create it
@@ -46,19 +49,25 @@ function getMemories(): Memories {
   return JSON.parse(fs.readFileSync(memory_path, "utf-8"));
 }
 
-export function getMemoriesByManager(manager_id: string) {
-  return getMemories()[manager_id] || [];
+export function getMemoriesByManager(manager_id: string, user_id: string) {
+  const memories = getMemories();
+  return memories[manager_id]?.[user_id] || [];
 }
 
 function saveMemories(memories: Memories) {
   fs.writeFileSync(memory_path, JSON.stringify(memories, null, 2));
 }
 
-export function createMemory(params: CreateMemory, manager_id: string) {
+export function createMemory(
+  params: CreateMemory,
+  manager_id: string,
+  user_id: string
+) {
   try {
     const memories = getMemories();
-    memories[manager_id] = memories[manager_id] || [];
-    if (memories[manager_id].length >= 5) {
+    memories[manager_id] = memories[manager_id] || {};
+    memories[manager_id][user_id] = memories[manager_id][user_id] || [];
+    if (memories[manager_id][user_id].length >= 5) {
       return { error: "You have reached the limit of memories." };
     }
     const uuid = randomUUID();
@@ -69,7 +78,7 @@ export function createMemory(params: CreateMemory, manager_id: string) {
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     };
-    memories[manager_id].push(new_mem);
+    memories[manager_id][user_id].push(new_mem);
     saveMemories(memories);
     return { id: new_mem.id };
   } catch (error) {
@@ -77,11 +86,18 @@ export function createMemory(params: CreateMemory, manager_id: string) {
   }
 }
 
-export function updateMemory(params: UpdateMemory, manager_id: string) {
+export function updateMemory(
+  params: UpdateMemory,
+  manager_id: string,
+  user_id: string
+) {
   try {
     const memories = getMemories();
-    memories[manager_id] = memories[manager_id] || [];
-    const memory = memories[manager_id].find((m) => m.id === params.id);
+    memories[manager_id] = memories[manager_id] || {};
+    memories[manager_id][user_id] = memories[manager_id][user_id] || [];
+    const memory = memories[manager_id][user_id].find(
+      (m) => m.id === params.id
+    );
     if (!memory) {
       return { error: "Memory not found" };
     }
@@ -94,11 +110,16 @@ export function updateMemory(params: UpdateMemory, manager_id: string) {
   }
 }
 
-export function deleteMemory(params: DeleteMemory, manager_id: string) {
+export function deleteMemory(
+  params: DeleteMemory,
+  manager_id: string,
+  user_id: string
+) {
   try {
     const memories = getMemories();
-    memories[manager_id] = memories[manager_id] || [];
-    memories[manager_id] = memories[manager_id].filter(
+    memories[manager_id] = memories[manager_id] || {};
+    memories[manager_id][user_id] = memories[manager_id][user_id] || [];
+    memories[manager_id][user_id] = memories[manager_id][user_id].filter(
       (m) => m.id !== params.id
     );
     saveMemories(memories);
@@ -108,21 +129,21 @@ export function deleteMemory(params: DeleteMemory, manager_id: string) {
   }
 }
 
-export const memory_tools = (manager_id: string) => [
+export const memory_tools = (manager_id: string, user_id: string) => [
   zodFunction({
-    function: (args) => createMemory(args, manager_id),
+    function: (args) => createMemory(args, manager_id, user_id),
     name: "create_memory",
     schema: CreateMemorySchema,
     description: "Create a memory.",
   }),
   zodFunction({
-    function: (args) => updateMemory(args, manager_id),
+    function: (args) => updateMemory(args, manager_id, user_id),
     name: "update_memory",
     schema: UpdateMemorySchema,
     description: "Update a memory.",
   }),
   zodFunction({
-    function: (args) => deleteMemory(args, manager_id),
+    function: (args) => deleteMemory(args, manager_id, user_id),
     name: "delete_memory",
     schema: DeleteMemorySchema,
     description: "Delete a memory.",
@@ -141,8 +162,9 @@ async function memoryManager(
   manager_id: string
 ) {
   try {
-    const current_memories = getMemories()[manager_id] || [];
-    const tools = memory_tools(manager_id);
+    const user_id = context_message.author.id;
+    const current_memories = getMemoriesByManager(manager_id, user_id);
+    const tools = memory_tools(manager_id, user_id);
 
     const response = await ask({
       model: "gpt-4o",
@@ -166,7 +188,7 @@ ${JSON.stringify(current_memories)}
       message: params.request,
       name: manager_id,
       seed: `memory-man-${manager_id}-${
-        context_message.author.username ?? context_message.author.id
+        context_message.author.id ?? context_message.author.username
       }`,
       tools,
     });
@@ -190,7 +212,7 @@ export const memory_manager_init = (
     description:
       `Manages memories for a manager or yourself.
 
-- Memories are isolated per manager; managers can't access each other's memories.
+- Memories are isolated per manager and per user; managers can't access each other's memories, and users can't access other users' memories.
 - **Use Cases:**
 - Remembering important user preferences.
 - Anything you want to recall later.
@@ -201,20 +223,20 @@ export const memory_manager_init = (
 
 Memories are limited and costly; use them wisely.
 ` +
-        manager_id ===
-      "self"
-        ? `### Imporant Note
-        Make sure you only use this for your own memories and not for other memories that you can tell other managers to remember.
-        `
-        : "",
+      (manager_id === "self"
+        ? `### Important Note
+Make sure you only use this for your own memories and not for other memories that you can tell other managers to remember.
+`
+        : ""),
   });
 };
 
 export const memory_manager_guide = (
-  manager_id: string
+  manager_id: string,
+  user_id: string
 ) => `# Memories Saved for You
 
-${JSON.stringify(getMemoriesByManager(manager_id), null, 2)}
+${JSON.stringify(getMemoriesByManager(manager_id, user_id), null, 2)}
 
 You can store up to 5 memories at a time. Use them wisely.
 `;

@@ -477,7 +477,7 @@ Follow the above guidelines to manage notes efficiently.
 
 ----
 
-${memory_manager_guide("notes_manager")}
+${memory_manager_guide("notes_manager", context_message.author.id)}
 
 ----
 
