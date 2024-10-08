@@ -2,6 +2,7 @@ import OpenAI from "openai";
 import { saveApiUsage } from "../usage";
 import axios from "axios";
 import fs from "fs";
+import path from "path";
 import { RunnableToolFunctionWithParse } from "openai/lib/RunnableFunction.mjs";
 import {
   ChatCompletion,
@@ -132,13 +133,17 @@ export async function ask({
   name,
   tools,
   seed,
+  json,
+  image_url,
 }: {
   model?: string;
   prompt: string;
   message?: string;
+  image_url?: string;
   name?: string;
   tools?: RunnableToolFunctionWithParse<any>[];
   seed?: string;
+  json?: boolean;
 }): Promise<ChatCompletion> {
   // Initialize OpenAI instances
   const openai = new OpenAI({
@@ -171,10 +176,24 @@ export async function ask({
       ...history,
       {
         role: "user",
-        content: message,
+        content: image_url
+          ? [
+              {
+                type: "text",
+                text: message,
+              },
+              {
+                type: "image_url",
+                image_url: {
+                  url: image_url,
+                },
+              },
+            ]
+          : message,
         name,
       },
     ];
+    console.log("got image:", image_url?.slice(0, 20));
   } else if (seed && !message) {
     // If seed is provided but no new message, just retrieve history
     const history = getMessageHistory(seed);
@@ -189,7 +208,20 @@ export async function ask({
     // If no seed but message is provided, send system prompt and user message without history
     messages.push({
       role: "user",
-      content: message,
+      content: image_url
+        ? [
+            {
+              type: "text",
+              text: message,
+            },
+            {
+              type: "image_url",
+              image_url: {
+                url: image_url,
+              },
+            },
+          ]
+        : message,
       name,
     });
   }
@@ -228,6 +260,7 @@ export async function ask({
         model,
         messages,
         tools,
+        response_format: json ? { type: "json_object" } : undefined,
       })
       .on("functionCall", (functionCall) => {
         send_sys_log(`ASK Function call: ${JSON.stringify(functionCall)}`);
@@ -293,15 +326,20 @@ export async function ask({
 const transcriptionCacheFile = pathInDataDir("transcription_cache.json");
 
 export async function get_transcription(
-  file_url: string,
+  input: string | File, // Accept either a file URL (string) or a File object
   binary?: boolean,
   key?: string
 ) {
+  // const openai = new OpenAI({
+  //   apiKey: ai_token,
+  // });
+
   const openai = new OpenAI({
-    apiKey: ai_token,
+    apiKey: groq_token,
+    baseURL: groq_baseurl,
   });
 
-  // Step 1: Check if the transcription for this file URL is already cached
+  // Step 1: Check if the transcription for this input (file_url or File) is already cached
   let transcriptionCache: Record<string, string> = {};
 
   // Try to read the cache file if it exists
@@ -310,77 +348,91 @@ export async function get_transcription(
     transcriptionCache = JSON.parse(cacheData);
   }
 
-  if (binary) {
-    // If transcription for this file_url is already in the cache, return it
-    if (key && transcriptionCache[key]) {
-      console.log("Transcription found in cache:", transcriptionCache[key]);
-      return transcriptionCache[key];
+  let filePath: string;
+  let isAudio = false;
+  let fileExtension: string;
+
+  // Determine if the input is a File or URL and handle accordingly
+  if (input instanceof File) {
+    // Check the MIME type for audio validation
+    if (!input.type.startsWith("audio/")) {
+      throw new Error("The provided file is not an audio file.");
+    }
+    isAudio = true;
+
+    // Set file extension based on the MIME type
+    fileExtension = getExtensionFromMimeType(input.type) ?? "ogg";
+    if (!fileExtension) {
+      throw new Error(`Unsupported audio file type: ${input.type}`);
     }
 
-    const binaryData = Buffer.from(file_url, "base64");
-    // fs.writeFile("/home/audio_whats.ogg", binaryData, function (err) {});
+    // Write the file to the filesystem temporarily with the correct extension
+    filePath = `/tmp/audio${Date.now()}.${fileExtension}`;
+    const buffer = await input.arrayBuffer();
+    fs.writeFileSync(filePath, new Uint8Array(buffer));
+  } else if (typeof input === "string") {
+    if (binary) {
+      // If input is binary data
+      const binaryData = Buffer.from(input, "base64");
+      if (key && transcriptionCache[key]) {
+        console.log("Transcription found in cache:", transcriptionCache[key]);
+        return transcriptionCache[key];
+      }
+      filePath = `/tmp/audio${Date.now()}.ogg`; // Default to .ogg for binary input
+      fs.writeFileSync(filePath, new Uint8Array(binaryData));
+    } else {
+      // Treat input as a file URL and extract the file extension
+      fileExtension = path.extname(input).slice(1).toLowerCase();
+      if (!["mp3", "ogg", "wav", "m4a"].includes(fileExtension)) {
+        throw new Error(
+          "The provided URL does not point to a valid audio file."
+        );
+      }
+      isAudio = true;
 
-    const filePath = `/tmp/audio${Date.now()}.ogg`;
+      // Step 2: Download the file from the URL
+      const response = await axios({
+        url: input,
+        method: "GET",
+        responseType: "stream",
+      });
 
-    fs.writeFileSync(filePath, new Uint8Array(binaryData));
+      filePath = `/tmp/audio${Date.now()}.${fileExtension}`;
 
-    // Step 3: Send the file to OpenAI's Whisper model
-    const transcription = await openai.audio.transcriptions.create({
-      model: "whisper-1",
-      file: fs.createReadStream(filePath),
-    });
+      // Save the downloaded file locally
+      const writer = fs.createWriteStream(filePath);
+      response.data.pipe(writer);
 
-    // Delete the temp file
-    fs.unlinkSync(filePath);
-
-    // Step 4: Save the transcription to the cache
-    key && (transcriptionCache[key] = transcription.text);
-    fs.writeFileSync(
-      transcriptionCacheFile,
-      JSON.stringify(transcriptionCache, null, 2)
+      await new Promise((resolve, reject) => {
+        writer.on("finish", resolve);
+        writer.on("error", reject);
+      });
+    }
+  } else {
+    throw new Error(
+      "Invalid input type. Must be either a file URL or a File object."
     );
-
-    console.log("Transcription:", transcription);
-
-    return transcription.text;
-  }
-
-  // If transcription for this file_url is already in the cache, return it
-  if (transcriptionCache[file_url]) {
-    console.log("Transcription found in cache:", transcriptionCache[file_url]);
-    return transcriptionCache[file_url];
   }
 
   try {
-    // Step 2: Download the file from the URL
-    const response = await axios({
-      url: file_url,
-      method: "GET",
-      responseType: "stream",
-    });
-
-    const filePath = `/tmp/audio${Date.now()}.ogg`;
-
-    // Save the downloaded file locally
-    const writer = fs.createWriteStream(filePath);
-    response.data.pipe(writer);
-
-    await new Promise((resolve, reject) => {
-      writer.on("finish", resolve);
-      writer.on("error", reject);
-    });
-
-    // Step 3: Send the file to OpenAI's Whisper model
+    // Step 3: Send the file to OpenAI's Whisper model for transcription
     const transcription = await openai.audio.transcriptions.create({
-      model: "whisper-1",
+      // model: "whisper-1",
+      model: "distil-whisper-large-v3-en",
       file: fs.createReadStream(filePath),
+      language: "en", // Optional
+      temperature: 0.0, // Optional
     });
 
     // Delete the temp file
     fs.unlinkSync(filePath);
 
     // Step 4: Save the transcription to the cache
-    transcriptionCache[file_url] = transcription.text;
+    if (key) {
+      transcriptionCache[key] = transcription.text;
+    } else if (typeof input === "string") {
+      transcriptionCache[input] = transcription.text;
+    }
     fs.writeFileSync(
       transcriptionCacheFile,
       JSON.stringify(transcriptionCache, null, 2)
@@ -390,5 +442,20 @@ export async function get_transcription(
     return transcription.text;
   } catch (error) {
     console.error("Error transcribing audio:", error);
+    throw error;
   }
+}
+
+// Helper function to get file extension based on MIME type
+function getExtensionFromMimeType(mimeType: string): string | null {
+  const mimeTypesMap: Record<string, string> = {
+    "audio/mpeg": "mp3",
+    "audio/ogg": "ogg",
+    "audio/wav": "wav",
+    "audio/x-wav": "wav",
+    "audio/x-m4a": "m4a",
+    "audio/m4a": "m4a",
+    // Add other audio types as necessary
+  };
+  return mimeTypesMap[mimeType] || null;
 }

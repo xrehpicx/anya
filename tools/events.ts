@@ -9,7 +9,7 @@ import path from "path";
 import { discordAdapter } from "../interfaces";
 import { RunnableToolFunctionWithParse } from "openai/lib/RunnableFunction.mjs";
 import { getTools, zodFunction } from ".";
-import { ask } from "./ask";
+import { ask, get_transcription } from "./ask";
 import { get_actions } from "./actions";
 import { pathInDataDir, userConfigs } from "../config";
 import { memory_manager_guide, memory_manager_init } from "./memory-manager";
@@ -398,11 +398,52 @@ function registerListener(listener: EventListener) {
 
         const is_voice = listener.eventId === "on_voice_message";
 
+        let attached_image: string | undefined = undefined;
+
         if (is_voice) {
           tools = getTools(
             contextMessage.author.username,
             contextMessage
           ) as RunnableToolFunctionWithParse<any>[];
+
+          const audio = ((payload as any) ?? {}).transcription;
+          if (audio && audio instanceof File) {
+            if (audio.type.includes("audio")) {
+              console.log("Transcribing audio for voice event listener.");
+              (payload as any).transcription = await get_transcription(
+                audio as File
+              );
+            }
+          }
+
+          const otherContextData = (payload as any)?.other_context_data;
+
+          if (otherContextData instanceof File) {
+            if (otherContextData.type.includes("image")) {
+              // Read the file as a buffer
+              const buffer = await otherContextData.arrayBuffer();
+
+              // Convert the buffer to a base64 string
+              const base64Url = `data:${
+                otherContextData.type
+              };base64,${Buffer.from(buffer).toString("base64")}`;
+
+              // Create the object with base64 URL
+              const imageObject = {
+                type: "image_url",
+                image_url: {
+                  url: base64Url,
+                },
+              };
+
+              // Do something with imageObject, like sending it in a response or logging
+              attached_image = base64Url;
+            } else {
+              console.log("The provided file is not an image.");
+            }
+          } else {
+            console.log("No valid file provided in other_context_data.");
+          }
         }
 
         console.log("Running ASK for event listener: ", listener.description);
@@ -471,12 +512,12 @@ function registerListener(listener: EventListener) {
           - Payload: ${JSON.stringify(payload, null, 2)}
           
           Follow the transcript provided in the payload.
-          Reply only in plain text without markdown or any other formatting.
+          
+          You response must be in plain text without markdown or any other formatting.
           `;
 
         if (system_prompts) {
           prompt = `${system_prompts.map((p) => p.content).join("\n\n")}`;
-          // console.log("Voice system Prompt: ", prompt);
         }
 
         const response = !is_voice
@@ -486,9 +527,10 @@ function registerListener(listener: EventListener) {
               tools,
             })
           : await ask({
-              model: "gpt-4o-mini",
+              model: attached_image ? "gpt-4o" : "gpt-4o-mini",
               prompt,
               message: voice_prompt,
+              image_url: attached_image,
               seed: `voice-anya-${listener.id}-${eventId}`,
               tools,
             });
@@ -503,7 +545,11 @@ function registerListener(listener: EventListener) {
         }
 
         // Send a message to the user indicating the event was triggered
-        if (notify) await contextMessage.send({ content });
+        if (notify)
+          await contextMessage.send({
+            content,
+            flags: is_voice ? [4096] : undefined,
+          });
         else console.log("Silenced Notification: ", content);
 
         // Handle auto-stop options

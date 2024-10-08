@@ -277,7 +277,9 @@ export class DiscordAdapter implements PlatformAdapter {
       isDirectMessage: async () =>
         discordMessage.channel.type === ChannelType.DM,
       send: async (messageData) => {
-        const sentMessage = await discordMessage.channel.send(messageData);
+        const sentMessage = await (discordMessage.channel as TextChannel).send(
+          messageData
+        );
         return this.convertSentMessage(sentMessage);
       },
       reply: async (messageData) => {
@@ -309,12 +311,12 @@ export class DiscordAdapter implements PlatformAdapter {
         return Promise.all(messages.map((msg) => this.convertMessage(msg)));
       },
       sendFile: async (fileUrl, fileName) => {
-        await discordMessage.channel.send({
+        await (discordMessage.channel as TextChannel).send({
           files: [{ attachment: fileUrl, name: fileName }],
         });
       },
       sendTyping: async () => {
-        await discordMessage.channel.sendTyping();
+        await (discordMessage.channel as TextChannel).sendTyping();
       },
     };
 
@@ -366,19 +368,21 @@ export class DiscordAdapter implements PlatformAdapter {
         return Promise.all(messages.map((msg) => this.convertMessage(msg)));
       },
       sendFile: async (fileUrl, fileName) => {
-        await discordMessage.channel.send({
+        await (discordMessage.channel as TextChannel).send({
           files: [{ attachment: fileUrl, name: fileName }],
         });
       },
       sendTyping: async () => {
-        await discordMessage.channel.sendTyping();
+        await (discordMessage.channel as TextChannel).sendTyping();
       },
       reply: async (messageData) => {
         const sentMessage = await discordMessage.reply(messageData);
         return this.convertSentMessage(sentMessage);
       },
       send: async (messageData) => {
-        const sentMessage = await discordMessage.channel.send(messageData);
+        const sentMessage = await (discordMessage.channel as TextChannel).send(
+          messageData
+        );
         return this.convertSentMessage(sentMessage);
       },
     };

@@ -28,6 +28,8 @@ export interface Embed {
 export interface MessageData {
   content?: string;
   embeds?: Embed[];
+  options?: any;
+  flags?: any;
   file?:
     | {
         url: string;

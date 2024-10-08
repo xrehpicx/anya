@@ -111,6 +111,7 @@ You can use the \`memory_manager\` tool to remember user preferences, such as wh
 
   const response = await ask({
     prompt,
+    model: "gpt-4o",
     message: `request: ${request}
 
     prefered_platform: ${prefered_platform}

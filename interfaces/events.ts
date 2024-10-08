@@ -1,6 +1,7 @@
 import { Elysia, t } from "elysia";
 import { userConfigs } from "../config";
 import { send_sys_log } from "./log";
+import { get_transcription } from "../tools/ask";
 
 // Define the type for the event callback
 type EventCallback = (
@@ -187,7 +188,7 @@ export const events = new Elysia()
           body = textbody;
         }
       }
-      // console.log("Event received", body);
+      console.log("Event received", body);
 
       if (id === "ping") {
         send_sys_log(`Ping event received: ${JSON.stringify(body)}`);
