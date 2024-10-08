@@ -13,6 +13,7 @@ Current Abilities:
 - Support a schedule to trigger anya to execute any given instruction.
 - Can store memories for certain tasks.
 - Can understand voice notes (warning: this currently uses openai hosted whisper which is unnecessarily expensive, so do not use this if you are more than one person using this)
+- Talk to anya shortcut (https://www.icloud.com/shortcuts/62e5a50276464de6bfb7b67fecf1f0de)
 
 Current Tools & Managers:
 
