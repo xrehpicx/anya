@@ -428,14 +428,6 @@ function registerListener(listener: EventListener) {
                 otherContextData.type
               };base64,${Buffer.from(buffer).toString("base64")}`;
 
-              // Create the object with base64 URL
-              const imageObject = {
-                type: "image_url",
-                image_url: {
-                  url: base64Url,
-                },
-              };
-
               // Do something with imageObject, like sending it in a response or logging
               attached_image = base64Url;
             } else {
@@ -447,7 +439,6 @@ function registerListener(listener: EventListener) {
         }
 
         console.log("Running ASK for event listener: ", listener.description);
-        console.log("Payload: ", payload);
 
         const system_prompts = is_voice
           ? await buildSystemPrompts(contextMessage)
@@ -490,7 +481,7 @@ function registerListener(listener: EventListener) {
           
           - **Event ID:** ${eventId}
           - **Description:** ${description}
-          - **Payload:** ${JSON.stringify(payload, null, 2)}
+          - **Payload:** ${JSON.stringify(payload)}
           - **Will Auto Notify Creator of Listener:** ${notify ? "Yes" : "No"}
           - **Instruction:** ${listener.instruction}
           
@@ -500,7 +491,7 @@ function registerListener(listener: EventListener) {
           
           **Action Required:**
           
-          - Follow the instruction provided.
+          - Follow the instruction provided in the payload.
           - Return the notification text based on the instruction.
           `;
 
@@ -508,12 +499,12 @@ function registerListener(listener: EventListener) {
 
           The voice event that triggered this is:
           - Event ID: ${eventId}
-          - Description: ${description}
-          - Payload: ${JSON.stringify(payload, null, 2)}
+          - Listener Description: ${description}
+          - Payload: ${JSON.stringify(payload)}
           
-          Follow the transcript provided in the payload.
+          Do the instruction provided in the payload of the event listener.
           
-          You response must be in plain text without markdown or any other formatting.
+          Your response must be in plain text without markdown or any other formatting.
           `;
 
         if (system_prompts) {
@@ -545,12 +536,14 @@ function registerListener(listener: EventListener) {
         }
 
         // Send a message to the user indicating the event was triggered
-        if (notify)
+        if (notify) {
           await contextMessage.send({
             content,
             flags: is_voice ? [4096] : undefined,
           });
-        else console.log("Silenced Notification: ", content);
+        } else {
+          console.log("Silenced Notification: ", content);
+        }
 
         // Handle auto-stop options
         if (options.autoStopAfterSingleEvent) {

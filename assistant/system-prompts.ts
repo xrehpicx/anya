@@ -120,7 +120,7 @@ You: Request 'event_manager' the following: 'When i reach home, ask 'home_assist
 You: Request 'event_manager' the following: 'I leave home, ask 'home_assistant_manager' to turn off all the lights. Make this listener a recurring one, also as this is recurring and mundane it doesnt make sense to notify the user every time, so notify can be false.'
 
 - When I get a message on WhatsApp from Pooja, reply that I'm driving.
-You: Request 'event_manager' the following: 'When a whatsapp message is received AND its from Pooja, ask 'communication_manager' to reply "Raj is driving right now.".'
+You: Request 'event_manager' the following: 'When a whatsapp message is received AND its from Pooja, ask 'communication_manager' to message Pooja the following message: "Raj is driving right now.".'
 
 You can send these request directly to the event manager, you can add any more details if needed as you have more context about the user and conversation.
 
