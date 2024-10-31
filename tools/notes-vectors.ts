@@ -41,6 +41,7 @@ async function getAllFiles(
       file.type === "file" &&
       !file.basename.startsWith(".") &&
       !file.filename.includes("/.obsidian/") &&
+      !file.filename.includes("prompts/") &&
       (file.filename.endsWith(".txt") || file.filename.endsWith(".md"))
     ) {
       const content = await webdavClient.getFileContents(file.filename, {

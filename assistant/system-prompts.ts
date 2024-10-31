@@ -4,6 +4,7 @@ import { OpenAI } from "openai";
 import { return_current_events } from "../tools/events";
 import { memory_manager_guide } from "../tools/memory-manager";
 import { searchFilesByTagWithCache } from "../tools/notes";
+import { semantic_search_notes } from "../tools/notes-vectors";
 
 const replaceTemplateStrings = (
   template: string,
@@ -30,10 +31,19 @@ export async function buildSystemPrompts(
     desc: event.description,
   }));
 
+  const potentially_relavent_files = await semantic_search_notes(
+    context_message.content,
+    4
+  );
+  const potentially_relavent_files_paths = potentially_relavent_files.map(
+    (f) => f.metadata.filename
+  );
+
   const data = {
     memory_guide: memory_manager_guide("self", context_message.author.id),
     events,
     user_id: context_message.author.id,
+    relavent_files: potentially_relavent_files_paths,
     model,
   };
 
