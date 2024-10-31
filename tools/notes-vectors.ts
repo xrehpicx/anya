@@ -8,6 +8,7 @@ import { v4 as uuidv4 } from "uuid";
 import * as crypto from "crypto";
 
 let isSyncing = false;
+let isCleanupRunning = false;
 
 // Initialize WebDAV client
 const webdavClient = createClient(
@@ -79,6 +80,7 @@ const config = {
 };
 
 const vectorStore = await PGVectorStore.initialize(embeddings, config);
+
 // Main function to sync vector store
 export async function syncVectorStore() {
   if (isSyncing) {
@@ -108,7 +110,6 @@ export async function syncVectorStore() {
 
         // If the checksum matches, skip updating
         if (existingChecksum === checksum) {
-          // console.log(`Skipping ${file.filename}, checksum unchanged.`);
           continue;
         }
 
@@ -139,10 +140,52 @@ export async function syncVectorStore() {
   }
 }
 
+// Function to remove deleted files from vector store
+export async function cleanupDeletedFiles() {
+  if (isCleanupRunning) {
+    console.log("cleanupDeletedFiles is already running. Skipping this run.");
+    return;
+  }
+
+  isCleanupRunning = true;
+  try {
+    console.log("Starting cleanup of deleted files...");
+
+    // Get the list of all files in the vector store
+    const queryResult = await vectorStore.client?.query(
+      `SELECT metadata->>'filename' AS filename, id FROM ${config.tableName}`
+    );
+
+    if (queryResult) {
+      const dbFiles = queryResult.rows;
+      const files = await getAllFiles("notes");
+      const existingFilenames = files.map((file) => file.filename);
+
+      for (const dbFile of dbFiles) {
+        if (!existingFilenames.includes(dbFile.filename)) {
+          // Delete the file from the vector store if it no longer exists in notes
+          await vectorStore.delete({ ids: [dbFile.id] });
+          console.log(
+            `Deleted ${dbFile.filename} from vector store as it no longer exists.`
+          );
+        }
+      }
+    }
+
+    console.log("Cleanup of deleted files completed.");
+  } catch (error) {
+    console.error("Error during cleanup of deleted files:", error);
+  } finally {
+    isCleanupRunning = false;
+  }
+}
+
 export async function initVectorStoreSync() {
   console.log("Starting vector store sync...");
   await syncVectorStore();
   setInterval(syncVectorStore, 1000 * 60 * 2); // Every 2 minutes
+  await cleanupDeletedFiles();
+  setInterval(cleanupDeletedFiles, 1000 * 60 * 60 * 12); // Every 12 hours
 }
 
 export function semantic_search_notes(query: string, limit: number) {
