@@ -193,7 +193,7 @@ export async function ask({
         name,
       },
     ];
-    console.log("got image:", image_url?.slice(0, 20));
+    image_url && console.log("got image:", image_url?.slice(0, 20));
   } else if (seed && !message) {
     // If seed is provided but no new message, just retrieve history
     const history = getMessageHistory(seed);
@@ -382,12 +382,12 @@ export async function get_transcription(
       fs.writeFileSync(filePath, new Uint8Array(binaryData));
     } else {
       // Treat input as a file URL and extract the file extension
-      fileExtension = path.extname(input).slice(1).toLowerCase();
-      if (!["mp3", "ogg", "wav", "m4a"].includes(fileExtension)) {
-        throw new Error(
-          "The provided URL does not point to a valid audio file."
-        );
-      }
+      fileExtension = "ogg";
+      // if (!["mp3", "ogg", "wav", "m4a"].includes(fileExtension)) {
+      //   throw new Error(
+      //     "The provided URL does not point to a valid audio file."
+      //   );
+      // }
       isAudio = true;
 
       // Step 2: Download the file from the URL
@@ -418,10 +418,12 @@ export async function get_transcription(
     // Step 3: Send the file to OpenAI's Whisper model for transcription
     const transcription = await openai.audio.transcriptions.create({
       // model: "whisper-1",
-      model: "distil-whisper-large-v3-en",
+      model: "whisper-large-v3-turbo",
       file: fs.createReadStream(filePath),
-      language: "en", // Optional
-      temperature: 0.0, // Optional
+      prompt:
+        "The audio may have email addresses or phonenumbers, please transcribe them in their respective formats.",
+      language: "en",
+      temperature: 0.1,
     });
 
     // Delete the temp file

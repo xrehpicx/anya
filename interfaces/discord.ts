@@ -4,7 +4,7 @@ import {
   SentMessage,
   User as StdUser,
   Attachment,
-  User,
+  User as StdMessageUser,
 } from "./message";
 import {
   Client,
@@ -14,12 +14,17 @@ import {
   Partials,
   ChannelType,
   ActivityType,
+  User as DiscordUser,
+  DMChannel,
 } from "discord.js";
 import { UserConfig, userConfigs } from "../config";
 
 export class DiscordAdapter implements PlatformAdapter {
   private client: Client;
   private botUserId: string = "";
+
+  private readonly MAX_MESSAGE_LENGTH = 2000;
+  private readonly TRUNCATED_MESSAGE_LENGTH = 1500;
 
   public config = {
     indicators: {
@@ -92,8 +97,9 @@ export class DiscordAdapter implements PlatformAdapter {
       console.error("Invalid channel type", channel?.type, channelId);
       return;
     }
-    await (channel as TextChannel).send(content);
+    await this.safeSend(channel as TextChannel, content);
   }
+
   public async fetchMessageById(
     channelId: string,
     messageId: string
@@ -157,7 +163,7 @@ export class DiscordAdapter implements PlatformAdapter {
       );
   }
 
-  public async searchUser(query: string): Promise<User[]> {
+  public async searchUser(query: string): Promise<StdMessageUser[]> {
     const users = this.client.users.cache;
     return users
       .filter((user) =>
@@ -193,11 +199,11 @@ export class DiscordAdapter implements PlatformAdapter {
         threadId: undefined,
         isDirectMessage: async () => true,
         send: async (messageData) => {
-          const sentMessage = await user.send(messageData);
+          const sentMessage = await this.safeSend(user, messageData);
           return this.convertSentMessage(sentMessage);
         },
         reply: async (messageData) => {
-          const sentMessage = await user.send(messageData);
+          const sentMessage = await this.safeSend(user, messageData);
           return this.convertSentMessage(sentMessage);
         },
         getUserRoles: () => {
@@ -212,12 +218,12 @@ export class DiscordAdapter implements PlatformAdapter {
         sendDirectMessage: async (userId, messageData) => {
           const user = await this.client.users.fetch(userId);
           console.log("sending message to: ", userId);
-          await user.send(messageData);
+          await this.safeSend(user, messageData);
         },
         sendMessageToChannel: async (channelId, messageData) => {
           const channel = await this.client.channels.fetch(channelId);
           if (channel?.isTextBased()) {
-            await (channel as TextChannel).send(messageData);
+            await this.safeSend(channel as TextChannel, messageData);
           }
         },
         fetchChannelMessages: async (limit: number) => {
@@ -227,9 +233,10 @@ export class DiscordAdapter implements PlatformAdapter {
           );
         },
         sendFile: async (fileUrl, fileName) => {
-          await user.dmChannel?.send({
+          const messageData = {
             files: [{ attachment: fileUrl, name: fileName }],
-          });
+          };
+          await this.safeSend(user, messageData);
         },
         sendTyping: async () => {
           await user.dmChannel?.sendTyping();
@@ -244,7 +251,7 @@ export class DiscordAdapter implements PlatformAdapter {
     }
   }
 
-  // You may also need to expose this method so it can be accessed elsewhere
+  // Expose getMessageInterface method
   public getMessageInterface = this.createMessageInterface;
 
   private async convertMessage(
@@ -277,13 +284,14 @@ export class DiscordAdapter implements PlatformAdapter {
       isDirectMessage: async () =>
         discordMessage.channel.type === ChannelType.DM,
       send: async (messageData) => {
-        const sentMessage = await (discordMessage.channel as TextChannel).send(
+        const sentMessage = await this.safeSend(
+          discordMessage.channel as TextChannel,
           messageData
         );
         return this.convertSentMessage(sentMessage);
       },
       reply: async (messageData) => {
-        const sentMessage = await discordMessage.reply(messageData);
+        const sentMessage = await this.safeReply(discordMessage, messageData);
         return this.convertSentMessage(sentMessage);
       },
       getUserRoles: () => {
@@ -298,12 +306,12 @@ export class DiscordAdapter implements PlatformAdapter {
       },
       sendDirectMessage: async (userId, messageData) => {
         const user = await this.client.users.fetch(userId);
-        await user.send(messageData);
+        await this.safeSend(user, messageData);
       },
       sendMessageToChannel: async (channelId, messageData) => {
         const channel = await this.client.channels.fetch(channelId);
         if (channel?.isTextBased()) {
-          await (channel as TextChannel).send(messageData);
+          await this.safeSend(channel as TextChannel, messageData);
         }
       },
       fetchChannelMessages: async (limit: number) => {
@@ -311,9 +319,10 @@ export class DiscordAdapter implements PlatformAdapter {
         return Promise.all(messages.map((msg) => this.convertMessage(msg)));
       },
       sendFile: async (fileUrl, fileName) => {
-        await (discordMessage.channel as TextChannel).send({
+        const messageData = {
           files: [{ attachment: fileUrl, name: fileName }],
-        });
+        };
+        await this.safeSend(discordMessage.channel as TextChannel, messageData);
       },
       sendTyping: async () => {
         await (discordMessage.channel as TextChannel).sendTyping();
@@ -345,7 +354,7 @@ export class DiscordAdapter implements PlatformAdapter {
         }
       },
       edit: async (data) => {
-        await discordMessage.edit(data);
+        await this.safeEdit(discordMessage, data);
       },
       getUserRoles: () => {
         // Since this is a message sent by the bot, return bot's roles or empty array
@@ -355,12 +364,12 @@ export class DiscordAdapter implements PlatformAdapter {
         discordMessage.channel.type === ChannelType.DM,
       sendDirectMessage: async (userId, messageData) => {
         const user = await this.client.users.fetch(userId);
-        await user.send(messageData);
+        await this.safeSend(user, messageData);
       },
       sendMessageToChannel: async (channelId, messageData) => {
         const channel = await this.client.channels.fetch(channelId);
         if (channel?.isTextBased()) {
-          await (channel as TextChannel).send(messageData);
+          await this.safeSend(channel as TextChannel, messageData);
         }
       },
       fetchChannelMessages: async (limit: number) => {
@@ -368,23 +377,103 @@ export class DiscordAdapter implements PlatformAdapter {
         return Promise.all(messages.map((msg) => this.convertMessage(msg)));
       },
       sendFile: async (fileUrl, fileName) => {
-        await (discordMessage.channel as TextChannel).send({
+        const messageData = {
           files: [{ attachment: fileUrl, name: fileName }],
-        });
+        };
+        await this.safeSend(discordMessage.channel as TextChannel, messageData);
       },
       sendTyping: async () => {
         await (discordMessage.channel as TextChannel).sendTyping();
       },
       reply: async (messageData) => {
-        const sentMessage = await discordMessage.reply(messageData);
+        const sentMessage = await this.safeReply(discordMessage, messageData);
         return this.convertSentMessage(sentMessage);
       },
       send: async (messageData) => {
-        const sentMessage = await (discordMessage.channel as TextChannel).send(
+        const sentMessage = await this.safeSend(
+          discordMessage.channel as TextChannel,
           messageData
         );
         return this.convertSentMessage(sentMessage);
       },
     };
+  }
+
+  // Helper method to safely send messages with length checks
+  private async safeSend(
+    target: TextChannel | DiscordUser,
+    messageData: string | { content?: string; [key: string]: any }
+  ): Promise<DiscordMessage> {
+    let content: string | undefined;
+    if (typeof messageData === "string") {
+      content = messageData;
+    } else if (messageData.content) {
+      content = messageData.content;
+    }
+
+    if (content && content.length > this.MAX_MESSAGE_LENGTH) {
+      content = content.slice(0, this.TRUNCATED_MESSAGE_LENGTH);
+      if (typeof messageData === "string") {
+        messageData = content;
+      } else {
+        messageData.content = content;
+      }
+    }
+
+    if (target instanceof DiscordUser) {
+      // Ensure the DM channel is created before sending
+      const dmChannel = await target.createDM();
+      return await dmChannel.send(messageData);
+    } else {
+      return await target.send(messageData);
+    }
+  }
+
+  // Helper method to safely reply with length checks
+  private async safeReply(
+    message: DiscordMessage,
+    messageData: string | { content?: string; [key: string]: any }
+  ): Promise<DiscordMessage> {
+    let content: string | undefined;
+    if (typeof messageData === "string") {
+      content = messageData;
+    } else if (messageData.content) {
+      content = messageData.content;
+    }
+
+    if (content && content.length > this.MAX_MESSAGE_LENGTH) {
+      content = content.slice(0, this.TRUNCATED_MESSAGE_LENGTH);
+      if (typeof messageData === "string") {
+        messageData = content;
+      } else {
+        messageData.content = content;
+      }
+    }
+
+    return await message.reply(messageData);
+  }
+
+  // Helper method to safely edit messages with length checks
+  private async safeEdit(
+    message: DiscordMessage,
+    data: string | { content?: string; [key: string]: any }
+  ): Promise<DiscordMessage> {
+    let content: string | undefined;
+    if (typeof data === "string") {
+      content = data;
+    } else if (data.content) {
+      content = data.content;
+    }
+
+    if (content && content.length > this.MAX_MESSAGE_LENGTH) {
+      content = content.slice(0, this.TRUNCATED_MESSAGE_LENGTH);
+      if (typeof data === "string") {
+        data = content;
+      } else {
+        data.content = content;
+      }
+    }
+
+    return await message.edit(data);
   }
 }

@@ -58,6 +58,8 @@ import { search_whatsapp_contacts, SearchContactsParams } from "./whatsapp";
 import { memory_manager_init } from "./memory-manager";
 import { communication_manager_tool } from "./communication";
 import { send_sys_log } from "../interfaces/log";
+import { init_anya_todos_watcher, init_notes_watcher } from "./notes-executer";
+import { initVectorStoreSync } from "./notes-vectors";
 
 // get time function
 const GetTimeParams = z.object({});
@@ -129,6 +131,10 @@ async function get_total_tokens({ model, from, to }: GetTotalTokensParams) {
     response: getTotalCompletionTokensForModel(model, from, to),
   };
 }
+
+init_notes_watcher();
+init_anya_todos_watcher();
+initVectorStoreSync();
 
 export function getTools(
   username: string,
@@ -382,7 +388,10 @@ Try to fix any errors that are returned at least once before sending to the user
         name: "reminders_manager",
         schema: RemindersManagerParams,
         description: `Manage reminders using user's reminders.
-        You can just forward the user's request to this tool and it will handle the rest.`,
+        You can just forward the user's request to this tool and it will handle the rest.
+        
+        More detailed todos that dont need user notification will be managed by the notes manager tool instead.
+        `,
       }),
     },
     {
@@ -409,6 +418,7 @@ Try to fix any errors that are returned at least once before sending to the user
         
         When to use: 
         if user talks about any notes, lists, journal, gym entry, standup, personal journal, etc.
+        You can also use this for advanced todos that are more planning related. (these are not reminders, and will not notify the user)
         `,
       }),
     },

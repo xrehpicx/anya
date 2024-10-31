@@ -397,15 +397,17 @@ function registerListener(listener: EventListener) {
         tools = tools?.length ? tools : undefined;
 
         const is_voice = listener.eventId === "on_voice_message";
+        const is_new_todo_note = listener.eventId === "new_todo_for_anya";
 
         let attached_image: string | undefined = undefined;
 
-        if (is_voice) {
+        if (is_voice || is_new_todo_note) {
           tools = getTools(
             contextMessage.author.username,
             contextMessage
           ) as RunnableToolFunctionWithParse<any>[];
-
+        }
+        if (is_voice) {
           const audio = ((payload as any) ?? {}).transcription;
           if (audio && audio instanceof File) {
             if (audio.type.includes("audio")) {
@@ -416,10 +418,12 @@ function registerListener(listener: EventListener) {
             }
           }
 
-          const otherContextData = (payload as any)?.other_context_data;
+          console.log("Payload for voice event listener: ", payload);
+          const otherContextData = (payload as any)?.other_reference_data;
 
           if (otherContextData instanceof File) {
             if (otherContextData.type.includes("image")) {
+              console.log("Got image");
               // Read the file as a buffer
               const buffer = await otherContextData.arrayBuffer();
 
@@ -434,15 +438,20 @@ function registerListener(listener: EventListener) {
               console.log("The provided file is not an image.");
             }
           } else {
-            console.log("No valid file provided in other_context_data.");
+            console.log(
+              "No valid file provided in other_context_data.",
+              otherContextData?.name,
+              otherContextData?.type
+            );
           }
         }
 
         console.log("Running ASK for event listener: ", listener.description);
 
-        const system_prompts = is_voice
-          ? await buildSystemPrompts(contextMessage)
-          : undefined;
+        const system_prompts =
+          is_voice || is_new_todo_note
+            ? await buildSystemPrompts(contextMessage)
+            : undefined;
 
         const prompt_heading = system_prompts
           ? ""
@@ -507,22 +516,42 @@ function registerListener(listener: EventListener) {
           Your response must be in plain text without markdown or any other formatting.
           `;
 
+        const new_todo_note_prompt = `You are in new todo note trigger mode.
+        
+        The user added a new todo note for you in your todos file which triggered this event.
+
+        Do not remove the to anya tag from the note if its present, unless explicitly asked to do so as part of the instruction.
+
+        Make sure to think about your process and how you want to step by step go about executing the todos.
+
+        You can mark a todo as failed by adding "[FAILED]" at the start of end of the todo line.
+        
+        - Event ID: ${eventId}
+        - Payload: ${JSON.stringify(payload)}
+        
+        IMPORTANT: 
+        PLEASE ask notes manager to mark the note as done if you have completed the task, plz send the manager the todo note and the actual path of the note.
+        Whatever you reply with will be sent to the user as a notification automatically. Do not use communication_manager to notify the same user.
+        `;
+
         if (system_prompts) {
           prompt = `${system_prompts.map((p) => p.content).join("\n\n")}`;
         }
 
-        const response = !is_voice
+        const response = !(is_voice || is_new_todo_note)
           ? await ask({
               model: "gpt-4o-mini",
               prompt,
               tools,
             })
           : await ask({
-              model: attached_image ? "gpt-4o" : "gpt-4o",
+              model: attached_image ? "gpt-4o" : "gpt-4o-mini",
               prompt,
-              message: voice_prompt,
-              image_url: attached_image,
-              seed: `voice-anya-${listener.id}-${eventId}`,
+              message: is_voice ? voice_prompt : new_todo_note_prompt,
+              image_url: attached_image ?? undefined,
+              seed: `${is_voice ? "voice-anya" : "todos-from-user"}-${
+                listener.id
+              }-${eventId}`,
               tools,
             });
 
@@ -539,7 +568,7 @@ function registerListener(listener: EventListener) {
         if (notify) {
           await contextMessage.send({
             content,
-            flags: is_voice ? [4096] : undefined,
+            flags: is_voice && !is_new_todo_note ? [4096] : undefined,
           });
         } else {
           console.log("Silenced Notification: ", content);

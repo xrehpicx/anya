@@ -167,7 +167,7 @@ async function memoryManager(
     const tools = memory_tools(manager_id, user_id);
 
     const response = await ask({
-      model: "gpt-4o",
+      model: "gpt-4o-mini",
       prompt: `You are a Memories Manager.
 
 You manage memories for other managers.

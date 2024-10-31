@@ -205,6 +205,7 @@ export const events = new Elysia()
       }
 
       if (!headers.token) {
+        console.log("Unauthorized");
         return { error: "Unauthorized" };
       }
 
@@ -212,6 +213,7 @@ export const events = new Elysia()
       const user = userConfigs.find((config) => config.name === username);
 
       if (!user) {
+        console.log("Unauthorized");
         return { error: "Unauthorized" };
       }
 
@@ -220,6 +222,7 @@ export const events = new Elysia()
       );
 
       if (!found) {
+        console.log("Unauthorized");
         return { error: "Unauthorized" };
       }
 

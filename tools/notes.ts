@@ -1,11 +1,15 @@
-import { createClient, ResponseDataDetailed } from "webdav";
+import { createClient, FileStat, ResponseDataDetailed } from "webdav";
 import { z } from "zod";
 import { zodFunction } from ".";
 import { RunnableToolFunction } from "openai/lib/RunnableFunction.mjs";
 import Fuse from "fuse.js";
-import { ask } from "./ask";
+import { ask, get_transcription } from "./ask";
 import { Message } from "../interfaces/message";
 import { memory_manager_guide, memory_manager_init } from "./memory-manager";
+import { semantic_search_notes, syncVectorStore } from "./notes-vectors";
+import { readFileSync, writeFileSync } from "fs";
+import { join } from "path";
+import { tmpdir } from "os";
 
 // Initialize WebDAV client
 const client = createClient("http://192.168.29.85/remote.php/dav/files/raj/", {
@@ -15,6 +19,7 @@ const client = createClient("http://192.168.29.85/remote.php/dav/files/raj/", {
 
 // Types
 export type OperationResult = { success: boolean; message: string | object };
+
 // Schemas for function parameters
 export const CreateFileParams = z.object({
   path: z.string().describe("The path for the new file."),
@@ -50,54 +55,100 @@ export const SearchFilesParams = z.object({
 export type SearchFilesParams = z.infer<typeof SearchFilesParams>;
 
 export const TagParams = z.object({
-  path: z.string().describe("The path to the file to tag."),
   tag: z.string().describe("The tag to add to the file."),
 });
 export type TagParams = z.infer<typeof TagParams>;
 
-// Helper function to remove the "notes/" prefix
-function normalizePath(path: string): string {
-  return path.startsWith("notes/") ? path.substring(6) : path;
+export const FetchFileContentsParams = z.object({
+  path: z
+    .string()
+    .describe("The path to the file whose content is to be fetched."),
+});
+export type FetchFileContentsParams = z.infer<typeof FetchFileContentsParams>;
+
+export const UpdateFileParams = z.object({
+  path: z.string().describe("The path to the note file to be updated."),
+  new_content: z
+    .string()
+    .describe("The new content to replace the existing content."),
+});
+export type UpdateFileParams = z.infer<typeof UpdateFileParams>;
+
+export const NotesManagerParams = z.object({
+  request: z.string().describe("User's request regarding notes."),
+});
+export type NotesManagerParams = z.infer<typeof NotesManagerParams>;
+
+export const SemanticSearchNotesParams = z.object({
+  query: z
+    .string()
+    .describe(
+      "The query to search for semantically similar notes, this can be something some content or even file name."
+    ),
+});
+
+type SemanticSearchNotesParams = z.infer<typeof SemanticSearchNotesParams>;
+
+async function semanticSearchNotes({
+  query,
+}: SemanticSearchNotesParams): Promise<OperationResult> {
+  try {
+    const results = await semantic_search_notes(query, 4);
+    return {
+      success: true,
+      message: results.map((r) => r.pageContent),
+    };
+  } catch (error: any) {
+    return { success: false, message: error.message };
+  }
 }
 
-// Function to create a file
+// Helper function to normalize paths
+function normalizePath(path: string): string {
+  if (path.startsWith("/notes/")) return path.substring(7);
+  if (path.startsWith("notes/")) return path.substring(6);
+  if (path === "/notes" || path === "notes") return "";
+  return path;
+}
+
+// File and directory operations
 export async function createFile({
   path,
   content,
 }: CreateFileParams): Promise<OperationResult> {
   try {
     await client.putFileContents(`/notes/${normalizePath(path)}`, content);
+    await syncVectorStore();
     return { success: true, message: "File created successfully" };
   } catch (error: any) {
     return { success: false, message: error.message };
   }
 }
 
-// Function to create a directory
 export async function createDirectory({
   path,
 }: CreateDirectoryParams): Promise<OperationResult> {
   try {
     await client.createDirectory(`/notes/${normalizePath(path)}`);
+    await syncVectorStore();
     return { success: true, message: "Directory created successfully" };
   } catch (error: any) {
     return { success: false, message: error.message };
   }
 }
 
-// Function to delete a file or directory
 export async function deleteItem({
   path,
 }: DeleteItemParams): Promise<OperationResult> {
   try {
     await client.deleteFile(`/notes/${normalizePath(path)}`);
+    await syncVectorStore();
     return { success: true, message: "Deleted successfully" };
   } catch (error: any) {
     return { success: false, message: error.message };
   }
 }
 
-// Function to move a file or directory
 export async function moveItem({
   source_path,
   destination_path,
@@ -107,46 +158,14 @@ export async function moveItem({
       `/notes/${normalizePath(source_path)}`,
       `/notes/${normalizePath(destination_path)}`
     );
+    await syncVectorStore();
     return { success: true, message: "Moved successfully" };
   } catch (error: any) {
     return { success: false, message: error.message };
   }
 }
 
-// Function to search for files by name
-export async function searchFilesByName({
-  query,
-}: SearchFilesParams): Promise<OperationResult> {
-  try {
-    const files = await client.getDirectoryContents("notes", {
-      details: true,
-      deep: true,
-    });
-
-    // If `files` is of type `ResponseDataDetailed<FileStat[]>`, you need to access the data property
-    const fileList = Array.isArray(files) ? files : files.data;
-
-    // Setup fuse.js with the filenames
-    const fuse = new Fuse(fileList, {
-      keys: ["filename"], // Search within filenames
-      threshold: 0.3, // Adjust this to control the fuzziness (0 = exact match, 1 = very fuzzy)
-    });
-
-    const matchingFiles = fuse.search(query).map((result) => result.item);
-
-    return {
-      success: true,
-      message:
-        matchingFiles.length > 0
-          ? matchingFiles.map((file) => file.filename).join(", ")
-          : "No matching files found",
-    };
-  } catch (error: any) {
-    return { success: false, message: error.message };
-  }
-}
-
-// Function to search for files by content
+// Search functions
 export async function searchFilesByContent({
   query,
 }: SearchFilesParams): Promise<OperationResult> {
@@ -156,42 +175,33 @@ export async function searchFilesByContent({
       deep: true,
     });
 
-    // If `files` is of type `ResponseDataDetailed<FileStat[]>`, you need to access the data property
     const fileList = Array.isArray(files) ? files : files.data;
+    const matchingFiles: string[] = [];
 
-    // First, filter files by filename using fuse.js
+    // Search by filename using Fuse.js
     const fuseFilename = new Fuse(fileList, {
-      keys: ["basename"], // Search within filenames
-      threshold: 0.3, // Adjust this to control the fuzziness
+      keys: ["basename"],
+      threshold: 0.3,
     });
     const matchingFilesByName = fuseFilename
       .search(query)
-      .map((result) => result.item);
+      .map((result) => result.item.filename);
 
-    const matchingFilesByContent = [];
-
-    // Then, check file content
+    // Search by file content
     for (const file of fileList) {
       if (file.type === "file") {
         const content = await client.getFileContents(file.filename, {
           format: "text",
         });
-        const fuseContent = new Fuse([String(content)], {
-          threshold: 0.3, // Adjust for content search
-        });
-        const contentMatch = fuseContent.search(query);
-        if (contentMatch.length > 0) {
-          matchingFilesByContent.push(normalizePath(file.filename));
+        if (typeof content === "string" && content.includes(query)) {
+          matchingFiles.push(normalizePath(file.filename));
         }
       }
     }
 
-    // Combine results from filename and content search
+    // Combine and deduplicate results
     const combinedResults = [
-      ...new Set([
-        ...matchingFilesByName.map((f) => f.filename),
-        ...matchingFilesByContent,
-      ]),
+      ...new Set([...matchingFilesByName, ...matchingFiles]),
     ];
 
     return {
@@ -206,41 +216,56 @@ export async function searchFilesByContent({
   }
 }
 
-// Placeholder for tagging functionality
-export async function tagFile({
-  path,
-  tag,
-}: TagParams): Promise<OperationResult> {
-  return { success: false, message: "Tagging not supported with WebDAV." };
+export async function searchFilesByTag({ tag }: TagParams) {
+  const files = await client.getDirectoryContents("notes", {
+    details: true,
+    deep: true,
+  });
+
+  const fileList = Array.isArray(files) ? files : files.data;
+  const matchingFiles: Array<{ filename: string; content: string }> = [];
+
+  for (const file of fileList) {
+    if (file.type === "file") {
+      const fileContent = await client.getFileContents(file.filename, {
+        format: "text",
+      });
+      if (typeof fileContent === "string" && fileContent.includes(tag)) {
+        matchingFiles.push({ filename: file.filename, content: fileContent });
+      }
+    }
+  }
+
+  return matchingFiles;
 }
 
-// Placeholder for searching files by tag
-export async function searchFilesByTag({
-  tag,
-}: TagParams): Promise<OperationResult> {
-  return { success: false, message: "Tagging not supported with WebDAV." };
-}
+// Notes list caching
+let cachedNotesList: string | null = null;
+let lastFetchTime: number | null = null;
 
 export async function getNotesList(): Promise<OperationResult> {
   try {
-    const directoryContents = await fetchDirectoryContents("notes");
+    const currentTime = Date.now();
+    if (
+      cachedNotesList &&
+      lastFetchTime &&
+      currentTime - lastFetchTime < 5000
+    ) {
+      return { success: true, message: cachedNotesList };
+    }
 
-    const treeStructure = buildTree(directoryContents as any);
-    return {
-      success: true,
-      message: JSON.stringify(treeStructure, null, 2),
-    };
+    const directoryContents = await fetchDirectoryContents("notes");
+    const treeStructure = buildTree(directoryContents);
+    cachedNotesList = JSON.stringify(treeStructure, null, 2);
+    lastFetchTime = currentTime;
+
+    return { success: true, message: cachedNotesList };
   } catch (error: any) {
-    return {
-      success: false,
-      message: error.message,
-    };
+    return { success: false, message: error.message };
   }
 }
 
-async function fetchDirectoryContents(
-  path: string
-): Promise<ReturnType<typeof client.getDirectoryContents>> {
+async function fetchDirectoryContents(path: string): Promise<FileStat[]> {
   let contents = await client.getDirectoryContents(path);
 
   // Normalize contents to always be an array of FileStat
@@ -252,7 +277,7 @@ async function fetchDirectoryContents(
   for (const item of contents) {
     if (item.type === "directory") {
       const subdirectoryContents = await fetchDirectoryContents(item.filename);
-      contents = contents.concat(subdirectoryContents as any);
+      contents = contents.concat(subdirectoryContents);
     }
   }
 
@@ -264,11 +289,17 @@ function buildTree(files: any[]): any {
 
   files.forEach((file) => {
     const parts: string[] = file.filename.replace(/^\/notes\//, "").split("/");
+
+    // Ignore files inside dot folders
+    if (parts.some((part) => part.startsWith(".obsidian"))) {
+      return;
+    }
+
     let current = tree;
 
     parts.forEach((part, index) => {
       if (!current[part]) {
-        current[part] = index === parts.length - 1 ? null : {}; // Leaf nodes are set to null
+        current[part] = index === parts.length - 1 ? null : {};
       }
       current = current[part];
     });
@@ -277,62 +308,194 @@ function buildTree(files: any[]): any {
   return tree;
 }
 
-export const FetchFileContentsParams = z.object({
-  path: z
-    .string()
-    .describe("The path to the file whose content is to be fetched."),
-});
-export type FetchFileContentsParams = z.infer<typeof FetchFileContentsParams>;
-
-// The fetchFileContents function
+// File content operations
 export async function fetchFileContents({
   path,
 }: FetchFileContentsParams): Promise<OperationResult> {
   try {
-    // Fetch the file content from the WebDAV server
-    const fileContent: ResponseDataDetailed<string> =
-      (await client.getFileContents(`/notes/${normalizePath(path)}`, {
-        format: "text",
-        details: true,
-      })) as ResponseDataDetailed<string>;
+    const fileContent = await client.getFileContents(
+      `/notes/${normalizePath(path)}`,
+      { format: "text", details: true }
+    );
 
-    return {
-      success: true,
-      message: fileContent,
-    };
+    if (typeof fileContent === "string") {
+      // Should not happen when details is true
+      return { success: true, message: fileContent };
+    } else if ("data" in fileContent) {
+      return { success: true, message: fileContent.data };
+    } else {
+      return {
+        success: false,
+        message: "Unexpected response format from getFileContents.",
+      };
+    }
   } catch (error: any) {
-    return {
-      success: false,
-      message: error.message,
-    };
+    return { success: false, message: error.message };
   }
 }
-
-export const UpdateFileParams = z.object({
-  path: z.string().describe("The path to the note file to be updated."),
-  new_content: z
-    .string()
-    .describe("The new content to replace the existing content."),
-});
-export type UpdateFileParams = z.infer<typeof UpdateFileParams>;
 
 export async function updateNote({
   path,
   new_content,
 }: UpdateFileParams): Promise<OperationResult> {
   try {
-    // Fetch the existing content to ensure the file exists and to avoid overwriting unintentionally
-    const existingContent = await client.getFileContents(
-      `/notes/${normalizePath(path)}`,
-      {
+    await client.putFileContents(`/notes/${normalizePath(path)}`, new_content);
+    await syncVectorStore();
+    return { success: true, message: "Note updated successfully" };
+  } catch (error: any) {
+    return { success: false, message: error.message };
+  }
+}
+
+// Caching for tag-based searches
+let cachedFiles: Array<{ filename: string; content: string }> | null = null;
+let isUpdatingCache = false;
+
+export async function searchFilesByTagWithCache({ tag }: TagParams) {
+  if (cachedFiles) {
+    if (!isUpdatingCache) {
+      console.log("Updating cache");
+      setTimeout(() => updateCache(tag), 0);
+    }
+    return cachedFiles;
+  }
+
+  cachedFiles = await updateCache(tag);
+  return cachedFiles;
+}
+
+async function updateCache(
+  tag: string
+): Promise<Array<{ filename: string; content: string }>> {
+  if (isUpdatingCache) {
+    return cachedFiles || [];
+  }
+
+  isUpdatingCache = true;
+  const files = await client.getDirectoryContents("notes", {
+    details: true,
+    deep: true,
+  });
+
+  const fileList = Array.isArray(files) ? files : files.data;
+  const matchingFiles: Array<{ filename: string; content: string }> = [];
+
+  for (const file of fileList) {
+    if (
+      file.type === "file" &&
+      (file.filename.endsWith(".md") || file.filename.endsWith(".txt"))
+    ) {
+      const fileContent = await client.getFileContents(file.filename, {
         format: "text",
+      });
+      if (typeof fileContent === "string" && fileContent.includes(tag)) {
+        matchingFiles.push({ filename: file.filename, content: fileContent });
+      }
+    }
+  }
+
+  cachedFiles = matchingFiles;
+  isUpdatingCache = false;
+  return matchingFiles;
+}
+
+// Notes manager integration
+export async function notesManager(
+  { request }: NotesManagerParams,
+  context_message: Message
+) {
+  const notesManagerPromptFiles = await searchFilesByTagWithCache({
+    tag: "#notes-manager",
+  });
+
+  const tools = webdav_tools.concat(
+    memory_manager_init(context_message, "notes_manager")
+  );
+
+  const potentially_relavent_files = await semantic_search_notes(request, 4);
+  const potentially_relavent_files_paths = potentially_relavent_files.map(
+    (f) => f.metadata.filename
+  );
+
+  const response = await ask({
+    model: "gpt-4o",
+    prompt: `You are an Obsidian vault manager.
+
+Ensure the vault remains organized, filenames and paths are correct, and relavent files are linked to each other.
+You can try creating canvas files that use the open json canvas format
+
+- **Today's Date:** ${new Date().toDateString()}
+
+- **ALL Vault's File structure for context:**
+---
+${(await getNotesList()).message}
+---
+${
+  potentially_relavent_files_paths.length > 0
+    ? `
+- **Potentially relevant files:**
+
+You can use these files to get more context or to link to the notes you are creating/updating.
+
+---
+${potentially_relavent_files_paths.join("\n")}
+---`
+    : ""
+}
+
+- **User Notes/Instructions for you:** 
+---
+${notesManagerPromptFiles.map((f) => f.content).join("\n")}
+---
+
+Note: When the user is trying to create/add a note, check the templates directory for any relevant templates if available. If available, fetch the relevant template and create the note based on the template.
+    `,
+    message: request,
+    seed: `notes-${context_message.channelId}`,
+    tools: tools as any,
+  });
+
+  return { response };
+}
+
+// Schema for the transcription function parameters
+export const TranscriptionParams = z.object({
+  file_path: z
+    .string()
+    .describe("The path to the audio file to be transcribed."),
+});
+export type TranscriptionParams = z.infer<typeof TranscriptionParams>;
+
+// Tool for handling transcription requests
+export async function transcribeAudioFile({
+  file_path,
+}: TranscriptionParams): Promise<OperationResult> {
+  try {
+    // Download the audio file from WebDAV
+    const audioFileBuffer = await client.getFileContents(
+      `/notes/${normalizePath(file_path)}`,
+      {
+        format: "binary",
       }
     );
 
-    // Update the file with the new content
-    await client.putFileContents(`/notes/${normalizePath(path)}`, new_content);
+    if (!Buffer.isBuffer(audioFileBuffer)) {
+      throw new Error("Failed to download audio file as Buffer.");
+    }
 
-    return { success: true, message: "Note updated successfully" };
+    // Convert the Buffer to a base64 string
+    const audioFileBase64 = audioFileBuffer.toString("base64");
+
+    // Transcribe the audio file
+    const transcription = await get_transcription(
+      audioFileBase64,
+      true,
+      file_path
+    );
+    return {
+      success: true,
+      message: transcription,
+    };
   } catch (error: any) {
     return { success: false, message: error.message };
   }
@@ -345,6 +508,13 @@ export let webdav_tools: RunnableToolFunction<any>[] = [
     name: "getNotesList",
     schema: z.object({}),
     description: "Get the list of note files and directories.",
+  }),
+  zodFunction({
+    function: transcribeAudioFile,
+    name: "transcribeAudioFile",
+    schema: TranscriptionParams,
+    description:
+      "Transcribe an audio file specified by the provided file path.",
   }),
   zodFunction({
     function: fetchFileContents,
@@ -382,115 +552,17 @@ export let webdav_tools: RunnableToolFunction<any>[] = [
     schema: MoveItemParams,
     description: "Move a note file or directory.",
   }),
-  // zodFunction({
-  //   function: searchFilesByName,
-  //   name: "searchNotesFilesByName",
-  //   schema: SearchFilesParams,
-  //   description: "Search notes by filename.",
-  // }),
   zodFunction({
-    function: searchFilesByContent,
-    name: "searchNotesFilesByContent",
-    schema: SearchFilesParams,
-    description: "Search notes by content.",
+    function: semanticSearchNotes,
+    name: "semanticSearchNotes",
+    schema: SemanticSearchNotesParams,
+    description: `Search notes by their semantically.
+
+You can use this to search by:
+1. Topic
+2. Content
+3. File Name
+4. Tags
+`,
   }),
-  zodFunction({
-    function: tagFile,
-    name: "tagNoteFile",
-    schema: TagParams,
-    description: "Add a tag to a note file.",
-  }),
-  // zodFunction({
-  //   function: searchFilesByTag,
-  //   name: "searchNotesFilesByTag",
-  //   schema: TagParams,
-  //   description: "Search notes by tag.",
-  // }),
 ];
-
-export function getNotesSystemPrompt() {
-  return `The notes system manages a structured file system for organizing and retrieving notes using Nextcloud via WebDAV. All notes are stored in the 'notes' directory, with subdirectories for different content types.
-
-**Key Directories:**
-
-- **Root**: Contains a 'readme' summarizing the structure.
-- **Journal**: Logs daily events and activities. Subdirectories include:
-  - **general**: General daily events or notes.
-  - **standup**: Work-related standup notes. Filenames should be dates in YYYY-MM-DD format.
-  - **personal**: Personal life events, same format as standup notes.
-  - **gym**: Gym or workout activities.
-
-- **Lists**: Contains lists of items or tasks. Subdirectories can organize different list types.
-
-**Standup and Personal Note Template:**
-
-- **Filename**: Date in YYYY-MM-DD format.
-- **Title**: Human-readable date (e.g., "Thursday 15th of July"), year not necessary.
-- **Updates Section**: List of updates describing the day's events.
-- **Summary Section**: A summary of the main points.
-
-**Gym Note Template:**
-
-- **Filename**: Date in YYYY-MM-DD format.
-- **Title**: Gym day and date (e.g., "Pull Day - Thursday 15th of July").
-- **Activity**: Exercises performed, sets, reps, weights.
-- **Progress Report**: Progress updates, achievements, challenges, comparisons with previous workouts, suggestions for improvement.
-
-**Lists Template:**
-
-- **Directory Structure**: Create subdirectories within 'lists' for different types (e.g., 'shows', 'movies', 'shopping').
-- **Filename**: Each file represents a list item with context. For 'shopping', use a single file like 'shopping.md'.
-
-**Functionality:**
-
-- Create, update, delete and move notes by filename or content.
-- The \`updateNote\` function modifies existing notes.
-
-This system ensures efficient note management, avoiding duplication, maintaining organization, and following structured templates for work and personal notes.`;
-}
-
-export const NotesManagerParams = z.object({
-  request: z.string().describe("User's request regarding notes."),
-});
-export type NotesManagerParams = z.infer<typeof NotesManagerParams>;
-
-export async function notesManager(
-  { request }: NotesManagerParams,
-  context_message: Message
-) {
-  const tools = webdav_tools.concat(
-    memory_manager_init(context_message, "notes_manager")
-  );
-  const response = await ask({
-    model: "gpt-4o",
-    prompt: `You are a notes manager for the 'notes' directory in Nextcloud.
-
-Your job is to understand the user's request (e.g., create, update, delete, move, list) and handle it using the available tools. Ensure the 'notes' directory remains organized, filenames and paths are correct, and duplication is prevented.
-
-Avoid running \`fetchNoteFileContents\` unnecessarily, as it fetches the entire file content and is resource-intensive.
-
-**More about the Notes System:**
-
-${getNotesSystemPrompt()}
-
-Follow the above guidelines to manage notes efficiently.
-
-----
-
-${memory_manager_guide("notes_manager", context_message.author.id)}
-
-----
-
-**Live Values:**
-
-- **Today's Date:** ${new Date().toDateString()}
-- **Current Notes List:**
-${(await getNotesList()).message}
-    `,
-    message: request,
-    seed: `notes-${context_message.channelId}`,
-    tools: tools as any,
-  });
-
-  return { response };
-}

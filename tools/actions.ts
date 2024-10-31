@@ -270,7 +270,7 @@ async function executeAction(action: Action) {
       tools = tools?.length ? tools : undefined;
 
       const response = await ask({
-        model: "gpt-4o",
+        model: "gpt-4o-mini",
         prompt: `You are an Action Executor.
       
       You are called to execute an action based on the provided instruction.
