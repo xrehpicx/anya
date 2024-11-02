@@ -83,12 +83,11 @@ async function handleNoteInstruction(
         request: `The following is a note that the user left a message for you in.
         The file path is: ${filePath}
         The user's instruction for you is in the file content and starts with '!!' followed by the message or a attached audio message that you can Transcribe to get the actual instructions.
-        file content:
-        ---
-        ${fileContent}
-        ---
 
-        Make sure to remove the user's instruction line (line that starts with '!!') and the respective audio message if there is one after you have read it and done the necessary action.
+        Note: Make sure to remove the user's instruction line (line that starts with '!!') and the respective audio message if there is one after you have read it and done the necessary action.
+
+        file content:
+        ${fileContent}
         `,
       },
       context_message

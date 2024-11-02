@@ -60,6 +60,10 @@ import { communication_manager_tool } from "./communication";
 import { send_sys_log } from "../interfaces/log";
 import { init_anya_todos_watcher, init_notes_watcher } from "./notes-executer";
 import { initVectorStoreSync } from "./notes-vectors";
+import {
+  dockerToolManager,
+  DockerToolManagerSchema,
+} from "./software-engineer";
 
 // get time function
 const GetTimeParams = z.object({});
@@ -458,6 +462,24 @@ Try to fix any errors that are returned at least once before sending to the user
 
         When to use:
         if user wants to create some automation based on some event.`,
+      }),
+    },
+    {
+      name: "softwareEngineerManagerTool",
+      tool: zodFunction({
+        function: (args) => dockerToolManager(args, context_message),
+        name: "software_engineer_manager",
+        schema: DockerToolManagerSchema,
+        description: `Software Engineer Manager Tool.
+His name is Cody. He is a software engineer, and someone who loves technology.
+He specializes in linux and devops.
+
+This tool can do anything related to what a tech person would do.
+They can scape website to search something, summerize youtube videos by just link, download full videos and more.
+This manager is like a whole other user that you are talking to.
+
+When talking to this manager, you can inform the user that you asked cody for this query etc.
+        `,
       }),
     },
     {

@@ -10,6 +10,7 @@ import { semantic_search_notes, syncVectorStore } from "./notes-vectors";
 import { readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
+import { message_anya_tool } from "./message-anya";
 
 // Initialize WebDAV client
 const client = createClient("http://192.168.29.85/remote.php/dav/files/raj/", {
@@ -425,6 +426,9 @@ Ensure the vault remains organized, filenames and paths are correct, and relaven
 You can try creating canvas files that use the open json canvas format
 
 - **Today's Date:** ${new Date().toDateString()}
+- **Current Time:** ${new Date().toLocaleTimeString()}
+
+You also have access to message_anya tool that can ask an ai called Anya for help with scheduling notifications reminders or even calender events for the user, you can also fetch details about the same by asking her.
 
 - **ALL Vault's File structure for context:**
 ---
@@ -443,10 +447,25 @@ ${potentially_relavent_files_paths.join("\n")}
     : ""
 }
 
+- **Recently Modified Files:**
+---
+${(await getRecentFiles({})).message}
+---
+
 - **User Notes/Instructions for you:** 
 ---
 ${notesManagerPromptFiles.map((f) => f.content).join("\n")}
 ---
+
+- **Current User's Home page (quick-note.md):** 
+---
+${
+  (
+    await fetchFileContents({
+      path: "quick-note.md",
+    })
+  ).message
+}
 
 Note: When the user is trying to create/add a note, check the templates directory for any relevant templates if available. If available, fetch the relevant template and create the note based on the template.
     `,
@@ -495,6 +514,36 @@ export async function transcribeAudioFile({
     return {
       success: true,
       message: transcription,
+    };
+  } catch (error: any) {
+    return { success: false, message: error.message };
+  }
+}
+
+export async function getRecentFiles({}): Promise<OperationResult> {
+  const limit = 5;
+  try {
+    const files = await client.getDirectoryContents("notes", {
+      details: true,
+      deep: true,
+    });
+
+    const fileList = Array.isArray(files) ? files : files.data;
+    const sortedFiles = fileList
+      .filter((file) => file.type === "file")
+      .sort((a, b) => {
+        const aTime = new Date(a.lastmod).getTime();
+        const bTime = new Date(b.lastmod).getTime();
+        return bTime - aTime;
+      });
+
+    const latestFiles = sortedFiles
+      .slice(0, limit)
+      .map((file) => file.filename);
+
+    return {
+      success: true,
+      message: latestFiles.length > 0 ? latestFiles : "No files found",
     };
   } catch (error: any) {
     return { success: false, message: error.message };
@@ -552,6 +601,7 @@ export let webdav_tools: RunnableToolFunction<any>[] = [
     schema: MoveItemParams,
     description: "Move a note file or directory.",
   }),
+  message_anya_tool("message_from_notes_manager"),
   zodFunction({
     function: semanticSearchNotes,
     name: "semanticSearchNotes",

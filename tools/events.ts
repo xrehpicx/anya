@@ -331,6 +331,24 @@ async function saveListenersToFile() {
   await fs.writeFile(LISTENERS_FILE_PATH, data, "utf-8");
 }
 
+/**
+ * Replaces placeholders in the format {{key}} in the template with corresponding values from the provided record.
+ * If the value is not a string, it will JSON stringify it before inserting.
+ *
+ * @param template - The string template containing placeholders like {{key}}.
+ * @param data - The record containing key-value pairs for replacement.
+ * @returns The formatted string with placeholders replaced by data values.
+ */
+function replacePlaceholders(
+  template: string,
+  data: Record<string, any>
+): string {
+  return template.replace(/{{\s*([^}]+)\s*}}/g, (_, key) => {
+    const value = data[key.trim()];
+    return typeof value === "string" ? value : JSON.stringify(value);
+  });
+}
+
 // Function to register a listener with the eventManager
 function registerListener(listener: EventListener) {
   const { eventId, description, userId, options, tool_names, notify } =
@@ -398,10 +416,12 @@ function registerListener(listener: EventListener) {
 
         const is_voice = listener.eventId === "on_voice_message";
         const is_new_todo_note = listener.eventId === "new_todo_for_anya";
+        const is_message_from_a_manager =
+          listener.eventId.startsWith("message_from");
 
         let attached_image: string | undefined = undefined;
 
-        if (is_voice || is_new_todo_note) {
+        if (is_voice || is_new_todo_note || is_message_from_a_manager) {
           tools = getTools(
             contextMessage.author.username,
             contextMessage
@@ -449,7 +469,7 @@ function registerListener(listener: EventListener) {
         console.log("Running ASK for event listener: ", listener.description);
 
         const system_prompts =
-          is_voice || is_new_todo_note
+          is_voice || is_new_todo_note || is_message_from_a_manager
             ? await buildSystemPrompts(contextMessage)
             : undefined;
 
@@ -494,14 +514,13 @@ function registerListener(listener: EventListener) {
           - **Will Auto Notify Creator of Listener:** ${notify ? "Yes" : "No"}
           - **Instruction:** ${listener.instruction}
           
-          **Important Note:**
-          
-          - If the above event and payload does **not** match the instruction, reply with the string **"IGNORE"** to skip executing the instruction for this payload.
-          
-          **Action Required:**
-          
+          **Action Required:**          
           - Follow the instruction provided in the payload.
           - Return the notification text based on the instruction.
+
+          **Important Note:**
+          - If the above event and payload does **not** match the instruction, reply with the string **"IGNORE"** to skip executing the instruction for this payload.
+          
           `;
 
         const voice_prompt = `You are in voice trigger mode.
@@ -534,33 +553,46 @@ function registerListener(listener: EventListener) {
         Whatever you reply with will be sent to the user as a notification automatically. Do not use communication_manager to notify the same user.
         `;
 
+        const message_from_manager_prompt = `You just got a request from a manager.
+
+        The manager has sent you a message which triggered this event.
+
+        - Event ID: ${eventId}
+        - Payload: ${JSON.stringify(payload)}
+`;
+
         if (system_prompts) {
           prompt = `${system_prompts.map((p) => p.content).join("\n\n")}`;
         }
 
-        const response = !(is_voice || is_new_todo_note)
-          ? await ask({
-              model: "gpt-4o-mini",
-              prompt,
-              tools,
-            })
-          : await ask({
-              model: attached_image ? "gpt-4o" : "gpt-4o-mini",
-              prompt,
-              message: is_voice ? voice_prompt : new_todo_note_prompt,
-              image_url: attached_image ?? undefined,
-              seed: `${is_voice ? "voice-anya" : "todos-from-user"}-${
-                listener.id
-              }-${eventId}`,
-              tools,
-            });
+        let promptToUse = prompt;
+        let seed = `${listener.id}-${eventId}`;
+
+        if (is_voice) {
+          promptToUse = voice_prompt;
+          seed = `voice-anya-${listener.id}-${eventId}`;
+        } else if (is_new_todo_note) {
+          promptToUse = new_todo_note_prompt;
+          seed = `todos-from-user-${listener.id}-${eventId}`;
+        } else if (is_message_from_a_manager) {
+          promptToUse = message_from_manager_prompt;
+          seed = `message-from-manager-${listener.id}-${eventId}`;
+        }
+
+        const response = await ask({
+          model: attached_image ? "gpt-4o" : "gpt-4o-mini",
+          prompt: promptToUse,
+          image_url: attached_image ?? undefined,
+          seed,
+          tools,
+        });
 
         const content = response.choices[0].message.content ?? undefined;
 
         const ignore = content?.includes("IGNORE");
 
         if (ignore) {
-          console.log("Ignoring event: ", content);
+          console.log("Ignoring event: ", content, payload);
           return;
         }
 

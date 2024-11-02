@@ -6,6 +6,7 @@ import {
 import { OpenAIEmbeddings } from "@langchain/openai";
 import { v4 as uuidv4 } from "uuid";
 import * as crypto from "crypto";
+import skmeans from "skmeans";
 
 let isSyncing = false;
 let isCleanupRunning = false;
@@ -76,11 +77,14 @@ const config = {
     vectorColumnName: "vector",
     contentColumnName: "content",
     metadataColumnName: "metadata",
+    clusterColumnName: "cluster",
   },
   distanceStrategy: "cosine" as DistanceStrategy,
 };
 
 const vectorStore = await PGVectorStore.initialize(embeddings, config);
+
+const CLUSTER_COUNT = 4;
 
 // Main function to sync vector store
 export async function syncVectorStore() {
@@ -93,6 +97,8 @@ export async function syncVectorStore() {
   try {
     console.log("Starting vector store sync...");
     const files = await getAllFiles("notes");
+
+    let filesIndexed = 0;
 
     for (const file of files) {
       const content = `filename: ${file.filename}\n${file.content}`;
@@ -129,10 +135,10 @@ export async function syncVectorStore() {
       await vectorStore.addDocuments([document], {
         ids: [document.metadata.id],
       });
-
+      filesIndexed++;
       console.log(`Indexed ${file.filename}`);
     }
-
+    filesIndexed > 0 && (await runClustering());
     console.log("Vector store sync completed.");
   } catch (error) {
     console.error("Error during vector store sync:", error);
@@ -161,16 +167,19 @@ export async function cleanupDeletedFiles() {
       const dbFiles = queryResult.rows;
       const files = await getAllFiles("notes");
       const existingFilenames = files.map((file) => file.filename);
+      let deletedFiles = 0;
 
       for (const dbFile of dbFiles) {
         if (!existingFilenames.includes(dbFile.filename)) {
           // Delete the file from the vector store if it no longer exists in notes
           await vectorStore.delete({ ids: [dbFile.id] });
+          deletedFiles++;
           console.log(
             `Deleted ${dbFile.filename} from vector store as it no longer exists.`
           );
         }
       }
+      deletedFiles > 0 && (await runClustering());
     }
 
     console.log("Cleanup of deleted files completed.");
@@ -181,12 +190,82 @@ export async function cleanupDeletedFiles() {
   }
 }
 
+// Ensure the cluster column exists in the table
+async function ensureClusterColumn() {
+  await vectorStore.client?.query(
+    `ALTER TABLE ${config.tableName} ADD COLUMN IF NOT EXISTS ${config.columns.clusterColumnName} INT;`
+  );
+  console.log("Ensured cluster column exists in the database.");
+}
+
+// Function to generate clusters from stored embeddings and save them to the database
+async function generateClusters(k: number) {
+  // Ensure the cluster column exists before proceeding
+  await ensureClusterColumn();
+
+  const queryResult = await vectorStore.client?.query(
+    `SELECT ${config.columns.idColumnName} as id, ${config.columns.vectorColumnName} as vector
+     FROM ${config.tableName}`
+  );
+
+  if (!queryResult) {
+    console.log("No embeddings found in the vector store.");
+    return;
+  }
+
+  // Process embeddings and format data
+  const embeddings = queryResult.rows.map((row) => {
+    let vector: number[] = [];
+
+    // Check vector data format and convert to number array if needed
+    if (Array.isArray(row.vector)) {
+      vector = row.vector;
+    } else if (typeof row.vector === "string") {
+      vector = JSON.parse(row.vector);
+    } else if (Buffer.isBuffer(row.vector)) {
+      vector = Array.from(row.vector);
+    } else {
+      console.error("Unknown vector format:", row.vector);
+    }
+
+    return {
+      id: row.id,
+      vector,
+    };
+  });
+
+  // Extract vectors for clustering
+  const vectors = embeddings.map((doc) => doc.vector);
+
+  // Run clustering algorithm (K-means)
+  const result = skmeans(vectors, k);
+
+  // Save each document’s cluster label in the database
+  for (const [index, doc] of embeddings.entries()) {
+    const cluster = result.idxs[index];
+    await vectorStore.client?.query(
+      `UPDATE ${config.tableName} SET ${config.columns.clusterColumnName} = $1 WHERE ${config.columns.idColumnName} = $2`,
+      [cluster, doc.id]
+    );
+    console.log(`Document ID: ${doc.id} assigned to Cluster: ${cluster}`);
+  }
+
+  console.log("Cluster assignments saved to database.");
+}
+
+// Exported function to run clustering
+export async function runClustering() {
+  const k = CLUSTER_COUNT;
+  console.log("Generating clusters...");
+  await generateClusters(k);
+}
+
 export async function initVectorStoreSync() {
   console.log("Starting vector store sync...");
   await syncVectorStore();
   setInterval(syncVectorStore, 1000 * 60 * 2); // Every 2 minutes
   await cleanupDeletedFiles();
-  setInterval(cleanupDeletedFiles, 1000 * 60 * 60 * 12); // Every 12 hours
+  setInterval(cleanupDeletedFiles, 1000 * 60 * 60 * 2); // Every 12 hours
 }
 
 export function semantic_search_notes(query: string, limit: number) {
