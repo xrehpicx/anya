@@ -3,7 +3,6 @@ import { $ } from "zx";
 import { zodFunction } from "./";
 import { Message } from "../interfaces/message";
 import { ask } from "./ask";
-import { memory_manager_init, memory_manager_guide } from "./memory-manager";
 import { ChatCompletion } from "openai/resources/index.mjs";
 import { eventManager } from "../interfaces/events";
 
@@ -14,7 +13,7 @@ export const DockerToolManagerSchema = z.object({
     .boolean()
     .optional()
     .describe(
-      "Wait for a reply from cody. if false or not defined cody will do the task in the background."
+      "Wait for a reply from cody. if false or not defined cody will do the task in the background. Defaults to true"
     ),
 });
 
@@ -51,9 +50,7 @@ export async function run_command({
   stderr = true,
   stdout = true,
 }: RunCommandParams): Promise<{
-  stdout?: string;
-  error?: string;
-  failedCommand?: string;
+  results: Map<string, { success: boolean; output?: string; error?: string }>;
 }> {
   // Step 1: Check if the container exists and is running
   try {
@@ -74,17 +71,41 @@ export async function run_command({
           createError.stderr || createError.message
         }`
       );
-      return { error: createError.stderr || createError.message };
+      return {
+        results: new Map([
+          [
+            "container_creation",
+            {
+              success: false,
+              error: createError.stderr || createError.message,
+            },
+          ],
+        ]),
+      };
     }
   }
 
   if (!wait) {
     // Return early if not waiting for command to finish
-    return { stdout: "Command execution started in the background." };
+    return {
+      results: new Map([
+        [
+          "background_execution",
+          {
+            success: true,
+            output: "Command execution started in the background.",
+          },
+        ],
+      ]),
+    };
   }
 
   // Step 2: Execute commands sequentially
-  let combinedStdout = "";
+  const results = new Map<
+    string,
+    { success: boolean; output?: string; error?: string }
+  >();
+
   for (let i = 0; i < commands.length; i++) {
     const command = commands[i];
     console.log(
@@ -95,27 +116,26 @@ export async function run_command({
       const processOutput =
         await $`docker exec ${containerName} /bin/bash -c ${command}`;
       console.log(`Command executed successfully: ${command}`);
-      if (stdout) {
-        combinedStdout += processOutput.stdout;
-      }
+      results.set(command, {
+        success: true,
+        output: stdout ? processOutput.stdout : undefined,
+      });
     } catch (runError: any) {
       console.error(
         `Error during command execution at command index ${i}: ${
           runError.stderr || runError.message
         }`
       );
-      if (stderr) {
-        return {
-          error: runError.stderr || runError.message,
-          failedCommand: command,
-        };
-      }
+      results.set(command, {
+        success: false,
+        error: stderr ? runError.stderr || runError.message : undefined,
+      });
     }
   }
 
-  // All commands executed successfully
-  console.log("All commands executed successfully.");
-  return { stdout: combinedStdout || "All commands executed successfully." };
+  // All commands executed
+  console.log("All commands executed.");
+  return { results };
 }
 
 // Tool definition for running commands in the Docker container
@@ -132,7 +152,7 @@ export const run_command_tool = {
 
 // Main Docker Tool Manager function
 export async function dockerToolManager(
-  { message, wait_for_reply }: DockerToolManager,
+  { message, wait_for_reply = true }: DockerToolManager,
   context_message: Message
 ): Promise<{ response: string }> {
   console.log("Docker Tool Manager invoked with message:", message);
@@ -141,6 +161,12 @@ export async function dockerToolManager(
 You are a software engineer, and someone who loves technology.
 
 You specialize in linux and devops, and a python expert.
+
+Using the above skills you can help the user with absolutely anything they ask for.
+Some examples include:
+- Browsing the internet.
+- Creating scripts for the user.
+- Any automation Task.
 
 You exist inside a docker container named '${containerName}'.
 
@@ -191,6 +217,10 @@ When you create a script in /anya/scripts/ directory you also should create a si
 
 This will help you run older scripts.
 
+Each script you make should accept parameters as cli args and output the result to stdout, for at least the basic scripts to do one off tasks like youtube video downloads or getting transcripts etc.
+
+If a script does not run or output as expected, consider this as an error and try to update and fix the script.
+
 You can also keep all your python dependencies in a virtual env inside /anya/scripts/venv/ directory.
 
 You can also use the /anya/media/ dir to store media files, You can arrange them in sub folders you create as needed.
@@ -211,6 +241,16 @@ What you need to do:
 5. Update the /anya/readme.md file with the changes you had to make to the environment like installing dependencies or creating new scripts.
 6. Reply with the file path of the youtube video, and anything else you want.
 
+Example flow 2:
+User: give me a transcript of this youtube video https://youtube.com/video
+What you need to do:
+1. Look at the /anya/scripts/ data if there is a script to get transcripts from youtube videos.
+2. If there is no script, create a new script to get transcripts from youtube videos while taking the param as the youtube url and the output file path and save it in /anya/scripts/ directory and also create a instruction_get_youtube_transcript.md file.
+3. look at the instruction_get_youtube_transcript.md file to see how to run that script.
+4. Run the script with relavent params.
+5. Return the transcript to the user.
+6. Update the /anya/readme.md file with the changes you had to make to the environment like installing dependencies or creating new scripts, if the script was already present you can skip this step.
+
 You can also leave notes for yourself in the same file for future reference of changes you make to your environment.
 `;
 
@@ -219,17 +259,20 @@ You can also leave notes for yourself in the same file for future reference of c
 
   let response: ChatCompletion;
 
+  const promise = ask({
+    model: "gpt-4o",
+    prompt: `${toolsPrompt}`,
+    tools: tools,
+    message: message,
+    seed: `cody-docker-tool-manager-${context_message.author.id}`,
+  });
+
   if (!wait_for_reply) {
     const timestamp = new Date().toTimeString();
     setTimeout(async () => {
       const startTime = Date.now();
       try {
-        response = await ask({
-          model: "gpt-4o",
-          prompt: `${toolsPrompt}`,
-          tools: tools,
-          message: message,
-        });
+        response = await promise;
       } catch (error: any) {
         console.error(`Error during ask function: ${error.message}`);
         return { response: `An error occurred: ${error.message}` };
@@ -253,12 +296,7 @@ You can also leave notes for yourself in the same file for future reference of c
   }
 
   try {
-    response = await ask({
-      model: "gpt-4o",
-      prompt: toolsPrompt,
-      tools: tools,
-      message: message,
-    });
+    response = await promise;
   } catch (error: any) {
     console.error(`Error during ask function: ${error.message}`);
     return { response: `An error occurred: ${error.message}` };
