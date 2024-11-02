@@ -6,7 +6,11 @@ import Fuse from "fuse.js";
 import { ask, get_transcription } from "./ask";
 import { Message } from "../interfaces/message";
 import { memory_manager_guide, memory_manager_init } from "./memory-manager";
-import { semantic_search_notes, syncVectorStore } from "./notes-vectors";
+import {
+  getClusteredFiles,
+  semantic_search_notes,
+  syncVectorStore,
+} from "./notes-vectors";
 import { readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
@@ -98,6 +102,21 @@ async function semanticSearchNotes({
     return {
       success: true,
       message: results.map((r) => r.pageContent),
+    };
+  } catch (error: any) {
+    return { success: false, message: error.message };
+  }
+}
+
+const GetClusteredFileListParams = z.object({});
+type GetClusteredFileListParams = z.infer<typeof GetClusteredFileListParams>;
+
+export async function getClusteredFileList({}: GetClusteredFileListParams): Promise<OperationResult> {
+  try {
+    const results = await getClusteredFiles();
+    return {
+      success: true,
+      message: JSON.stringify(results, null, 2),
     };
   } catch (error: any) {
     return { success: false, message: error.message };
@@ -614,5 +633,13 @@ You can use this to search by:
 3. File Name
 4. Tags
 `,
+  }),
+  zodFunction({
+    function: getClusteredFileList,
+    name: "getClusteredFileList",
+    schema: GetClusteredFileListParams,
+    description: `Get the list of notes files based on 4 cluster (unsupervised) semantic clustering.
+    You can use this to see how the notes are clustered based on their content.
+    `,
   }),
 ];

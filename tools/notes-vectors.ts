@@ -271,3 +271,32 @@ export async function initVectorStoreSync() {
 export function semantic_search_notes(query: string, limit: number) {
   return vectorStore.similaritySearch(query, limit);
 }
+
+export async function getClusteredFiles(): Promise<Record<string, string[]>> {
+  const result: Record<string, string[]> = {};
+
+  // Query to get filenames and their respective cluster assignments
+  const queryResult = await vectorStore.client?.query(
+    `SELECT ${config.columns.metadataColumnName}->>'filename' AS filename, ${config.columns.clusterColumnName} AS cluster
+     FROM ${config.tableName}`
+  );
+
+  if (!queryResult) {
+    console.log("No clustered files found in the vector store.");
+    return result;
+  }
+
+  // Group filenames by cluster
+  queryResult.rows.forEach((row) => {
+    const clusterName = `Cluster ${row.cluster}`; // Format the cluster name
+    const filename = row.filename;
+
+    if (!result[clusterName]) {
+      result[clusterName] = [];
+    }
+    result[clusterName].push(filename);
+  });
+
+  console.log("Clustered files:", result);
+  return result;
+}
