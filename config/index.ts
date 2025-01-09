@@ -6,7 +6,13 @@ export const dataDir = path.join(process.env.ANYA_DIR || "./");
 export const pathInDataDir = (filename: string) => path.join(dataDir, filename);
 
 interface PlatformIdentity {
-  platform: "discord" | "whatsapp" | "email" | "events";
+  platform:
+    | "discord"
+    | "whatsapp"
+    | "email"
+    | "events"
+    | "linear_key"
+    | "linear_email";
   id: string; // Platform-specific user ID
 }
 
@@ -22,7 +28,14 @@ export interface UserConfig {
 
 // Define Zod schemas for validation
 const PlatformIdentitySchema = z.object({
-  platform: z.enum(["discord", "whatsapp", "email", "events"]),
+  platform: z.enum([
+    "discord",
+    "whatsapp",
+    "email",
+    "events",
+    "linear_key",
+    "linear_email",
+  ]),
   id: z.string(),
 });
 

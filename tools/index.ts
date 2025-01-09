@@ -64,6 +64,7 @@ import {
   dockerToolManager,
   DockerToolManagerSchema,
 } from "./software-engineer";
+import { linear_manager_tool } from "./linear-manager";
 
 // get time function
 const GetTimeParams = z.object({});
@@ -436,6 +437,10 @@ Try to fix any errors that are returned at least once before sending to the user
         You can just forward the user's request to this tool and it will handle the rest.
         `,
       }),
+    },
+    {
+      name: "ProjectManager",
+      tool: linear_manager_tool(context_message),
     },
     {
       name: "actionsManagerTool",

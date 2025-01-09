@@ -2,11 +2,10 @@ import OpenAI from "openai";
 import { saveApiUsage } from "../usage";
 import axios from "axios";
 import fs from "fs";
-import path from "path";
+
 import { RunnableToolFunctionWithParse } from "openai/lib/RunnableFunction.mjs";
 import {
   ChatCompletion,
-  ChatCompletionAssistantMessageParam,
   ChatCompletionMessageParam,
 } from "openai/resources/index.mjs";
 import { send_sys_log } from "../interfaces/log";

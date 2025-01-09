@@ -14,6 +14,7 @@ import { get_actions } from "./actions";
 import { pathInDataDir, userConfigs } from "../config";
 import { memory_manager_guide, memory_manager_init } from "./memory-manager";
 import { buildSystemPrompts } from "../assistant/system-prompts";
+import { buildPromptAndToolsForEvent } from "./event-prompt-augmentations";
 
 // Paths to the JSON files
 const LISTENERS_FILE_PATH = pathInDataDir("listeners.json");
@@ -349,13 +350,25 @@ function replacePlaceholders(
   });
 }
 
+// Example registry mapping eventId -> zod schema
+const eventSchemaRegistry: Record<string, z.ZodType<any>> = {
+  // Example:
+  // ping: z.object({ message: z.string().optional() }),
+};
+
+// Generic function to get a schema for an event
+export function getSchemaForEvent(eventId: string) {
+  return eventSchemaRegistry[eventId] || z.object({});
+}
+
 // Function to register a listener with the eventManager
 function registerListener(listener: EventListener) {
   const { eventId, description, userId, options, tool_names, notify } =
     listener;
 
   const callback: EventCallback = async (
-    payload: Record<string, string | number>
+    payload: Record<string, string | number>,
+    awaiting?: boolean
   ) => {
     const event = eventsMap.get(eventId);
     if (event) {
@@ -388,6 +401,13 @@ function registerListener(listener: EventListener) {
         return;
       }
 
+      const schema = getSchemaForEvent(listener.eventId);
+      const result = schema.safeParse(payload);
+      if (!result.success) {
+        console.error("Invalid payload for event:", listener.eventId);
+        return;
+      }
+
       if (listener.template) {
         // Handle static event listener with template
         const formattedMessage = renderTemplate(listener.template, payload);
@@ -400,219 +420,73 @@ function registerListener(listener: EventListener) {
         return formattedMessage;
         // Expiry is handled via periodic cleanup
       } else if (listener.instruction) {
-        // Handle dynamic event listener with instruction and tools
-        const u_tool_names = Array.from(
+        // Combine the user-defined tool set with "event_manager"
+        const requiredToolNames = Array.from(
           new Set([...(tool_names ?? []), "event_manager"])
         );
-        let tools = getTools(
+        let baseTools = getTools(
           contextMessage.author.username,
           contextMessage
         ).filter(
           (tool) =>
-            tool.function.name && u_tool_names?.includes(tool.function.name)
+            tool.function.name && requiredToolNames.includes(tool.function.name)
         ) as RunnableToolFunctionWithParse<any>[] | undefined;
 
-        tools = tools?.length ? tools : undefined;
-
-        const is_voice = listener.eventId === "on_voice_message";
-        const is_new_todo_note = listener.eventId === "new_todo_for_anya";
-        const is_message_from_a_manager =
-          listener.eventId.startsWith("message_from");
-
-        let attached_image: string | undefined = undefined;
-
-        if (is_voice || is_new_todo_note || is_message_from_a_manager) {
-          tools = getTools(
-            contextMessage.author.username,
+        console.time("buildPromptAndToolsForEvent");
+        // Now call the helper from the new file
+        const { finalPrompt, finalTools, attachedImage, model, message } =
+          await buildPromptAndToolsForEvent(
+            eventId,
+            description,
+            payload,
+            listener.instruction,
+            notify,
+            baseTools,
             contextMessage
-          ) as RunnableToolFunctionWithParse<any>[];
-        }
-        if (is_voice) {
-          const audio = ((payload as any) ?? {}).transcription;
-          if (audio && audio instanceof File) {
-            if (audio.type.includes("audio")) {
-              console.log("Transcribing audio for voice event listener.");
-              (payload as any).transcription = await get_transcription(
-                audio as File
-              );
-            }
-          }
+          );
 
-          console.log("Payload for voice event listener: ", payload);
-          const otherContextData = (payload as any)?.other_reference_data;
+        console.timeEnd("buildPromptAndToolsForEvent");
 
-          if (otherContextData instanceof File) {
-            if (otherContextData.type.includes("image")) {
-              console.log("Got image");
-              // Read the file as a buffer
-              const buffer = await otherContextData.arrayBuffer();
+        console.log("model", model);
 
-              // Convert the buffer to a base64 string
-              const base64Url = `data:${
-                otherContextData.type
-              };base64,${Buffer.from(buffer).toString("base64")}`;
+        console.log("message", message);
 
-              // Do something with imageObject, like sending it in a response or logging
-              attached_image = base64Url;
-            } else {
-              console.log("The provided file is not an image.");
-            }
-          } else {
-            console.log(
-              "No valid file provided in other_context_data.",
-              otherContextData?.name,
-              otherContextData?.type
-            );
-          }
-        }
-
-        console.log("Running ASK for event listener: ", listener.description);
-
-        const system_prompts =
-          is_voice || is_new_todo_note || is_message_from_a_manager
-            ? await buildSystemPrompts(contextMessage)
-            : undefined;
-
-        const prompt_heading = system_prompts
-          ? ""
-          : `You are an Event Handler.`;
-
-        let prompt = `${prompt_heading}
-          You are called when an event triggers. Your task is to execute the user's instruction based on the triggered event and reply with the text to display as a notification to the user.
-          
-          **Guidelines:**
-          
-          - **Notification to User:**
-            - Any message you reply with will automatically be sent to the user as a notification.
-            - Do **not** indicate in the text that it is a notification.
-          
-          - **Using Tools:**
-            - You have access to the necessary tools to execute the instruction; use them as needed.
-            - You also have access to the \`event_manager\` tool if you need to manage events or listeners (use it only if necessary).
-          
-          - **Sending Messages:**
-            - **To the Current User:**
-              - Do **not** ask \`communication_manager\` tool. (if available)
-              - Simply reply with the message you want to send.
-            - **To Other Users:**
-              - Use the \`communication_manager\` tool. (if available)
-              - The message you reply with will still be sent to the current user as a notification.
-          
-          **Example:**
-          
-          - **Instruction:** "When you get an email from John, tell John on WhatsApp that you got the email."
-          - **Steps:**
-            1. Use the \`communication_manager\` tool to send a message to John on WhatsApp.
-               - Use the WhatsApp ID from the payload to send the message instead of searching for the user.
-            2. Reply to the current user with "I have sent a message to John on WhatsApp that you got the email."
-          
-          **Currently Triggered Event:**
-          
-          - **Event ID:** ${eventId}
-          - **Description:** ${description}
-          - **Payload:** ${JSON.stringify(payload)}
-          - **Will Auto Notify Creator of Listener:** ${notify ? "Yes" : "No"}
-          - **Instruction:** ${listener.instruction}
-          
-          **Action Required:**          
-          - Follow the instruction provided in the payload.
-          - Return the notification text based on the instruction.
-
-          **Important Note:**
-          - If the above event and payload does **not** match the instruction, reply with the string **"IGNORE"** to skip executing the instruction for this payload.
-          
-          `;
-
-        const voice_prompt = `You are in voice trigger mode.
-
-          The voice event that triggered this is:
-          - Event ID: ${eventId}
-          - Listener Description: ${description}
-          - Payload: ${JSON.stringify(payload)}
-          
-          Do the instruction provided in the payload of the event listener.
-          
-          Your response must be in plain text without markdown or any other formatting.
-          `;
-
-        const new_todo_note_prompt = `You are in new todo note trigger mode.
-        
-        The user added a new todo note for you in your todos file which triggered this event.
-
-        Do not remove the to anya tag from the note if its present, unless explicitly asked to do so as part of the instruction.
-
-        Make sure to think about your process and how you want to step by step go about executing the todos.
-
-        You can mark a todo as failed by adding "[FAILED]" at the start of end of the todo line.
-        
-        - Event ID: ${eventId}
-        - Payload: ${JSON.stringify(payload)}
-        
-        IMPORTANT: 
-        PLEASE ask notes manager to mark the note as done if you have completed the task, plz send the manager the todo note and the actual path of the note.
-        Whatever you reply with will be sent to the user as a notification automatically. Do not use communication_manager to notify the same user.
-        `;
-
-        const message_from_manager_prompt = `You just got a request from a manager.
-
-        The manager has sent you a message which triggered this event.
-
-        - Event ID: ${eventId}
-        - Payload: ${JSON.stringify(payload)}
-`;
-
-        if (system_prompts) {
-          prompt = `${system_prompts.map((p) => p.content).join("\n\n")}`;
-        }
-
-        let promptToUse = prompt;
-        let seed = `${listener.id}-${eventId}`;
-
-        if (is_voice) {
-          promptToUse = voice_prompt;
-          seed = `voice-anya-${listener.id}-${eventId}`;
-        } else if (is_new_todo_note) {
-          promptToUse = new_todo_note_prompt;
-          seed = `todos-from-user-${listener.id}-${eventId}`;
-        } else if (is_message_from_a_manager) {
-          promptToUse = message_from_manager_prompt;
-          seed = `message-from-manager-${listener.id}-${eventId}`;
-        }
-
+        console.time("ask");
+        // Send the final prompt to the model
         const response = await ask({
-          model: attached_image ? "gpt-4o" : "gpt-4o-mini",
-          prompt: promptToUse,
-          image_url: attached_image ?? undefined,
-          seed,
-          tools,
+          model: model,
+          message,
+          prompt: finalPrompt,
+          image_url: attachedImage, // If there's an attached image base64
+          seed: `${eventId}-${listener.id}`,
+          tools: finalTools,
         });
+        console.timeEnd("ask");
 
-        const content = response.choices[0].message.content ?? undefined;
+        const content = response.choices[0].message.content ?? "";
 
-        const ignore = content?.includes("IGNORE");
-
-        if (ignore) {
+        // Check if the response is "IGNORE"
+        if (content.includes("IGNORE")) {
           console.log("Ignoring event: ", content, payload);
           return;
         }
 
-        // Send a message to the user indicating the event was triggered
+        // Optionally notify the user
         if (notify) {
           await contextMessage.send({
             content,
-            flags: is_voice && !is_new_todo_note ? [4096] : undefined,
+            flags: !awaiting ? undefined : [4096],
           });
         } else {
           console.log("Silenced Notification: ", content);
         }
 
-        // Handle auto-stop options
+        // Auto-stop if requested
         if (options.autoStopAfterSingleEvent) {
           await removeListener(listener.id, eventId);
         }
 
         return content;
-        // Expiry is handled via periodic cleanup
       } else {
         console.error(
           `❌ Listener "${listener.id}" has neither 'instruction' nor 'template' defined.`

@@ -49,9 +49,7 @@ export async function run_command({
   wait = true,
   stderr = true,
   stdout = true,
-}: RunCommandParams): Promise<{
-  results: Map<string, { success: boolean; output?: string; error?: string }>;
-}> {
+}: RunCommandParams): Promise<unknown> {
   // Step 1: Check if the container exists and is running
   try {
     const isRunning =
@@ -72,31 +70,19 @@ export async function run_command({
         }`
       );
       return {
-        results: new Map([
-          [
-            "container_creation",
-            {
-              success: false,
-              error: createError.stderr || createError.message,
-            },
-          ],
-        ]),
+        results: {
+          error: createError.stderr || createError.message,
+          message: "Error creating container",
+        },
       };
     }
   }
 
   if (!wait) {
     // Return early if not waiting for command to finish
+    const results = { results: "Command started" };
     return {
-      results: new Map([
-        [
-          "background_execution",
-          {
-            success: true,
-            output: "Command execution started in the background.",
-          },
-        ],
-      ]),
+      results,
     };
   }
 
@@ -134,8 +120,9 @@ export async function run_command({
   }
 
   // All commands executed
-  console.log("All commands executed.");
-  return { results };
+  const resultsOb = Object.fromEntries(results);
+  console.log("All commands executed.", resultsOb);
+  return { results: resultsOb };
 }
 
 // Tool definition for running commands in the Docker container
@@ -156,102 +143,39 @@ export async function dockerToolManager(
   context_message: Message
 ): Promise<{ response: string }> {
   console.log("Docker Tool Manager invoked with message:", message);
+
   const toolsPrompt = `# You are Cody.
 
 You are a software engineer, and someone who loves technology.
 
 You specialize in linux and devops, and a python expert.
 
-Using the above skills you can help the user with absolutely anything they ask for.
-Some examples include:
-- Browsing the internet.
-- Creating scripts for the user.
-- Any automation Task.
+You also love to read markdown files to know more about why some files are the way they are.
 
-You exist inside a docker container named '${containerName}'.
+With the above expertise, you can do almost anything.
 
-The current time is: ${new Date().toLocaleString()}.
+Your home directory which has all your data is the /anya directory.
 
-## Responsibilities:
-1. You have access to a docker container of image python version 3.10 (based on Debian) that you can run commands on.
-2. You can install software, update configurations, or run scripts in the environment.
-3. You can presonalise the environment to your liking.
-4. Help the user when they ask you for something to be done.
+This is your home your desktop and your playground to maintain and manage your tools and yourself.
 
-### Container details:
-- The container is always running.
-- The container has a volume mounted at /anya which persists data across container restarts.
-- /anya is the only directory accessible to the user.
+Each directory inside /anya and /anya itself has its purpose defined in the readme.md file in its root.
 
-## The /anya/readme.md file
+Rules when interacting with /anya:
+1. Make sure to follow the instructions in the readme.md file in the root of the directory that you are trying to interact with.
+2. Make sure you remember that your commands are run in a docker container using the docker exec command, which means your session is not persistent between commands. So generate your commands accordingly.
+3. Any doubts you can try to figure out based on the markdown doc files you have access to, and if still not clear, you can ask user for more information.
 
-1. You can use the file at /anya/readme.md to keep track of all the changes you make to the environment.
+Use the above to help the user with their request.
 
-2. These changes can include installing new software, updating configurations, or running scripts.
-
-3. This file can also contain any account credentials or API keys that you saved with some description so that you know what they are for.
-
-4. It is important that you keep /anya/readme.md updated as to not repeat yourself, the /anya/readme.md acts as your memory.
-
-The current data from /anya/readme.md is:
+Current files in /anya are:
 \`\`\`
-${await $`cat /anya/readme.md`}
+${await $`ls -l /anya`}
 \`\`\`
 
-You can also use /anya/memories/ directory to store even more specific information incase the /anya/readme.md file gets too big.
-
-Current /anya/memories/ directory contents (tree /anya/memories/ command output):
+Current file structure in /anya is:
 \`\`\`
-${await $`tree /anya/memories/`}
-\`\`\`
-
-You can also save scripts in /anya/scripts/ directory and run them when needed.
-
-Current /anya/scripts/ directory contents (ls /anya/scripts/ command output):
-\`\`\`
-${await $`ls /anya/scripts/`}
-\`\`\`
-This directory can contain both python or any language script based on your preference.
-
-When you create a script in /anya/scripts/ directory you also should create a similarly named file prefixed with instruction_ that explains how to run the script.
-
-This will help you run older scripts.
-
-Each script you make should accept parameters as cli args and output the result to stdout, for at least the basic scripts to do one off tasks like youtube video downloads or getting transcripts etc.
-
-If a script does not run or output as expected, consider this as an error and try to update and fix the script.
-
-You can also keep all your python dependencies in a virtual env inside /anya/scripts/venv/ directory.
-
-You can also use the /anya/media/ dir to store media files, You can arrange them in sub folders you create as needed.
-
-Current /anya/media/ directory contents (ls /anya/media/ command output):
-\`\`\`
-${await $`ls /anya/media/`}
-\`\`\`
-
-
-Example flow:
-User: plz let me download this youtube video https://youtube.com/video
-What you need to do:
-1. Look at the /anya/scripts/ data if there is a script to download youtube videos.
-2. If there is no script, create a new script to download youtube videos while taking the param as the youtube url and the output file path and save it in /anya/scripts/ directory and also create a instruction_download_youtube_video.md file.
-3. look at the instruction_download_youtube_video.md file to see how to run that script.
-4. Run the script with relavent params.
-5. Update the /anya/readme.md file with the changes you had to make to the environment like installing dependencies or creating new scripts.
-6. Reply with the file path of the youtube video, and anything else you want.
-
-Example flow 2:
-User: give me a transcript of this youtube video https://youtube.com/video
-What you need to do:
-1. Look at the /anya/scripts/ data if there is a script to get transcripts from youtube videos.
-2. If there is no script, create a new script to get transcripts from youtube videos while taking the param as the youtube url and the output file path and save it in /anya/scripts/ directory and also create a instruction_get_youtube_transcript.md file.
-3. look at the instruction_get_youtube_transcript.md file to see how to run that script.
-4. Run the script with relavent params.
-5. Return the transcript to the user.
-6. Update the /anya/readme.md file with the changes you had to make to the environment like installing dependencies or creating new scripts, if the script was already present you can skip this step.
-
-You can also leave notes for yourself in the same file for future reference of changes you make to your environment.
+${await $`tree /anya -L 2`}
+\`\`\
 `;
 
   // Load tools for memory manager and Docker command execution

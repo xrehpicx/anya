@@ -5,7 +5,8 @@ import { get_transcription } from "../tools/ask";
 
 // Define the type for the event callback
 type EventCallback = (
-  payload: Record<string, string | number>
+  payload: Record<string, string | number>,
+  awaiting?: boolean
 ) => void | Record<string, any> | Promise<void> | Promise<Record<string, any>>;
 
 /**
@@ -74,7 +75,7 @@ class EventManager {
       // Execute all callbacks and collect their responses
       const promises = Array.from(callbacks).map(async (cb) => {
         try {
-          const result = cb(payload);
+          const result = cb(payload, true);
           if (result instanceof Promise) {
             return await result;
           }

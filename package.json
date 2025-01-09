@@ -17,6 +17,7 @@
     "@langchain/community": "^0.3.11",
     "@langchain/core": "^0.3.16",
     "@langchain/openai": "^0.3.11",
+    "@linear/sdk": "^37.0.0",
     "@nextcloud/files": "^3.8.0",
     "@solyarisoftware/voskjs": "^1.2.8",
     "@types/node-cron": "^3.0.11",
