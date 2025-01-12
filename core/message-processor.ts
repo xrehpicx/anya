@@ -32,16 +32,17 @@ export class MessageProcessor {
     });
   }
 
+  private checkpointMessageString = "🔄 Chat context has been reset.";
+
   public async processMessage(message: Message): Promise<void> {
     const userId = message.author.id;
     const channelId = message.channelId || userId; // Use message.id if channelId is not available
 
     // Check if the message is a stop message
     if (["stop", "reset"].includes(message.content.toLowerCase())) {
-      message.platform !== "whatsapp" &&
-        (await message.send({
-          content: "---setting this point as the start---",
-        }));
+      (await message.send({
+        content: this.checkpointMessageString,
+      }));
       // Clear maps
       const hashes = this.channelIdHashMap.get(channelId) ?? [];
       hashes.forEach((hash) => {
@@ -98,8 +99,7 @@ export class MessageProcessor {
       let stopIndex = -1;
       for (let i = 0; i < history.length; i++) {
         if (
-          history[i].content === "---setting this point as the start---" ||
-          history[i].content.replaceAll("!", "").trim() === "stop"
+          history[i].content === this.checkpointMessageString
         ) {
           stopIndex = i;
           break;
@@ -179,6 +179,10 @@ export class MessageProcessor {
           .map((e) => JSON.stringify(e))
           .join("\n");
 
+        console.log("Embeds", embeds?.length);
+        console.log("Files", files?.length);
+        console.log("Attachments", msg?.attachments?.length);
+
         // Transcribe voice messages
         const voiceMessagesPromises = (msg.attachments || [])
           .filter(
@@ -196,6 +200,11 @@ export class MessageProcessor {
           });
 
         const voiceMessages = await Promise.all(voiceMessagesPromises);
+
+        console.log("Voice Messages", voiceMessages);
+
+        const images = (msg.attachments || [])
+          .filter((a) => a.mediaType?.includes("image"))
 
         // Process context message if any
         let contextMessage = null;
@@ -219,12 +228,12 @@ export class MessageProcessor {
           created_at: format(msg.timestamp, "yyyy-MM-dd HH:mm:ss") + " IST",
           context_message: contextMessage
             ? {
-                author: contextMessage.author.username,
-                created_at:
-                  format(contextMessage.timestamp, "yyyy-MM-dd HH:mm:ss") +
-                  " IST",
-                content: contextMessage.content,
-              }
+              author: contextMessage.author.username,
+              created_at:
+                format(contextMessage.timestamp, "yyyy-MM-dd HH:mm:ss") +
+                " IST",
+              content: contextMessage.content,
+            }
             : undefined,
           context_files:
             contextMessage?.attachments?.map((a) => a.url) || undefined,
@@ -238,7 +247,20 @@ export class MessageProcessor {
 
         const aiMessage: OpenAI.Chat.ChatCompletionMessageParam = {
           role,
-          content: contextAsJson,
+          content: (images.length ? [
+            ...images.map(img => {
+              return {
+                type: "image_url",
+                image_url: {
+                  url: img.base64 || img.url,
+                },
+              }
+            }),
+            {
+              type: "text",
+              text: contextAsJson,
+            }
+          ] : contextAsJson) as string,
           name:
             user?.name ||
             msg.author.username.replace(/\s+/g, "_").substring(0, 64),
@@ -260,7 +282,7 @@ export class MessageProcessor {
 
     // Collect hashes
     history.forEach((msg) => {
-      const hash = this.generateHash(msg.content);
+      const hash = this.generateHash(typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content));
       channelHashes.push(hash);
     });
 
@@ -376,9 +398,13 @@ ${summaryContent}
           queueEntry.runningTools = true;
         }
         // Indicate running tools
-        if (this.sentMessage) {
-          await this.sentMessage.edit({ content: `Running ${fnc.name}...` });
-        } else await message.send({ content: `Running ${fnc.name}...` });
+        if (this.sentMessage?.platformAdapter.config.indicators.processing) {
+          if (this.sentMessage) {
+            await this.sentMessage.edit({ content: `Running ${fnc.name}...` });
+          } else {
+            this.sentMessage = await message.send({ content: `Running ${fnc.name}...` })
+          }
+        }
       })
       .on("message", (m) => {
         if (
@@ -434,7 +460,7 @@ ${summaryContent}
 
   private generateHash(input: string): string {
     const hash = createHash("sha256");
-    hash.update(input);
+    hash.update(typeof input === "string" ? input : JSON.stringify(input));
     return hash.digest("hex");
   }
 }

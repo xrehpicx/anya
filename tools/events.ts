@@ -434,7 +434,7 @@ function registerListener(listener: EventListener) {
 
         console.time("buildPromptAndToolsForEvent");
         // Now call the helper from the new file
-        const { finalPrompt, finalTools, attachedImage, model, message } =
+        const { finalPrompt, finalTools, attachedImages, model, message } =
           await buildPromptAndToolsForEvent(
             eventId,
             description,
@@ -457,7 +457,7 @@ function registerListener(listener: EventListener) {
           model: model,
           message,
           prompt: finalPrompt,
-          image_url: attachedImage, // If there's an attached image base64
+          image_urls: attachedImages, // If there's an attached image base64
           seed: `${eventId}-${listener.id}`,
           tools: finalTools,
         });

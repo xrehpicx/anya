@@ -12,20 +12,17 @@ import {
   MessageMedia,
 } from "whatsapp-web.js";
 import { UserConfig, userConfigs } from "../config";
-import { eventManager } from "./events";
+// import { eventManager } from "./events";
 import { return_current_listeners } from "../tools/events";
 import Fuse from "fuse.js";
-
-// const allowedUsers = ["pooja", "raj"];
-const allowedUsers: string[] = [];
+import { get_transcription } from "../tools/ask";  // Add this import
 
 export class WhatsAppAdapter implements PlatformAdapter {
   private client: WAClient;
-  private botUserId: string = "918884016724@c.us";
 
   public config = {
     indicators: {
-      typing: false,
+      typing: true,
       processing: false,
     },
   };
@@ -37,6 +34,11 @@ export class WhatsAppAdapter implements PlatformAdapter {
     try {
       this.client.on("ready", () => {
         console.log("WhatsApp Client is ready!");
+      });
+
+      this.client.on("qr", (qr) => {
+        console.log("QR Code received. Please scan with WhatsApp:");
+        console.log(qr);
       });
 
       this.client.initialize();
@@ -62,6 +64,8 @@ export class WhatsAppAdapter implements PlatformAdapter {
 
   public onMessage(callback: (message: StdMessage) => void): void {
     this.client.on("message_create", async (waMessage: WAMessage) => {
+
+
       // emit internal event only if text message and there is an active listener
       const listeners = return_current_listeners();
       if (
@@ -69,16 +73,16 @@ export class WhatsAppAdapter implements PlatformAdapter {
         !waMessage.fromMe &&
         listeners.find((l) => l.eventId.includes("whatsapp"))
       ) {
-        const contact = await this.client.getContactById(waMessage.from);
-        eventManager.emit("got_whatsapp_message", {
-          sender_id: waMessage.from,
-          sender_contact_name:
-            contact.name || contact.shortName || contact.pushname || "NA",
-          timestamp: waMessage.timestamp,
-          content: waMessage.body,
-          profile_image_url: await contact.getProfilePicUrl(),
-          is_group_message: contact.isGroup.toString(),
-        });
+        // const contact = await this.client.getContactById(waMessage.from);
+        // eventManager.emit("got_whatsapp_message", {
+        //   sender_id: waMessage.from,
+        //   sender_contact_name:
+        //     contact.name || contact.shortName || contact.pushname || "NA",
+        //   timestamp: waMessage.timestamp,
+        //   content: waMessage.body,
+        //   profile_image_url: await contact.getProfilePicUrl(),
+        //   is_group_message: contact.isGroup.toString(),
+        // });
       }
 
       // user must exist in userConfigs
@@ -88,14 +92,15 @@ export class WhatsAppAdapter implements PlatformAdapter {
         return;
       }
 
-      // user must be in allowedUsers
-      if (!allowedUsers.includes(usr.name)) {
-        // console.log(`User not allowed: ${usr.name}`);
-        return;
-      }
+      // // user must be in allowedUsers
+      // if (!allowedUsers.includes(usr.name)) {
+      //   console.log(`User not allowed: ${usr.name}`, allowedUsers);
+      //   return;
+      // }
 
       // Ignore messages sent by the bot
       if (waMessage.fromMe) return;
+
       const message = await this.convertMessage(waMessage);
 
       callback(message);
@@ -125,7 +130,7 @@ export class WhatsAppAdapter implements PlatformAdapter {
   }
 
   public getBotId(): string {
-    return this.botUserId;
+    return this.client.info.wid.user;
   }
 
   public async createMessageInterface(userId: string): Promise<StdMessage> {
@@ -280,6 +285,32 @@ export class WhatsAppAdapter implements PlatformAdapter {
   // Expose this method so it can be accessed elsewhere
   public getMessageInterface = this.createMessageInterface;
 
+  public async handleMediaAttachment(attachment: Attachment) {
+    if (!attachment.data) return { mediaType: 'other' as const };
+
+    const buffer = Buffer.from(attachment.data as string, 'base64');
+
+    if (attachment.type?.includes('image')) {
+      const base64 = `data:${attachment.contentType};base64,${buffer.toString('base64')}`;
+      return {
+        base64,
+        mediaType: 'image' as const
+      };
+    }
+
+    if (attachment.type?.includes('audio')) {
+      // Create temporary file for transcription
+      const tempFile = new File([buffer], 'audio', { type: attachment.contentType });
+      const transcription = await get_transcription(tempFile);
+      return {
+        transcription,
+        mediaType: 'audio' as const
+      };
+    }
+
+    return { mediaType: 'other' as const };
+  }
+
   private async convertMessage(waMessage: WAMessage): Promise<StdMessage> {
     const contact = await waMessage.getContact();
 
@@ -292,14 +323,25 @@ export class WhatsAppAdapter implements PlatformAdapter {
     // Convert attachments
     let attachments: Attachment[] = [];
     if (waMessage.hasMedia) {
+      console.log("Downloading media...");
       const media = await waMessage.downloadMedia();
 
-      attachments.push({
-        url: "", // WhatsApp does not provide a direct URL to the media
+      const attachment: Attachment = {
+        url: "",
         data: media.data,
         contentType: media.mimetype,
-        type: waMessage.type,
-      });
+        type: waMessage.type
+      };
+
+      console.log("Processing media attachment...");
+
+      const processedMedia = await this.handleMediaAttachment(attachment);
+      console.log("Processed media attachment:", processedMedia.transcription);
+      if (processedMedia.base64) attachment.base64 = processedMedia.base64;
+      if (processedMedia.transcription) attachment.transcription = processedMedia.transcription;
+      attachment.mediaType = processedMedia.mediaType;
+
+      attachments.push(attachment);
     }
 
     const stdMessage: StdMessage = {
@@ -358,7 +400,7 @@ export class WhatsAppAdapter implements PlatformAdapter {
           user.identities.some(
             (identity) =>
               identity.platform === "whatsapp" &&
-              identity.id === contact.id._serialized
+              identity.id === contact.id.user
           )
         );
         return userConfig ? userConfig.roles : ["user"];
@@ -400,7 +442,11 @@ export class WhatsAppAdapter implements PlatformAdapter {
       sendTyping: async () => {
         // WhatsApp Web API does not support sending typing indicators directly
         // You may leave this as a no-op
+        const chat = await this.client.getChatById(waMessage.from)
+        await chat.sendStateTyping()
+
       },
+      attachments,
     };
 
     return stdMessage;
@@ -540,6 +586,8 @@ export class WhatsAppAdapter implements PlatformAdapter {
       sendTyping: async () => {
         // WhatsApp Web API does not support sending typing indicators directly
         // You may leave this as a no-op
+        const chat = await this.client.getChatById(sentWAMessage.from)
+        await chat.sendStateTyping()
       },
     };
   }

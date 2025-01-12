@@ -4,6 +4,18 @@ import { startEventsServer } from "./events";
 import { Message } from "./message";
 import { WhatsAppAdapter } from "./whatsapp";
 
+// Add debounce utility function
+function debounce<T extends (...args: any[]) => any>(
+  func: T,
+  wait: number
+): (...args: Parameters<T>) => void {
+  let timeout: NodeJS.Timeout;
+  return (...args: Parameters<T>) => {
+    clearTimeout(timeout);
+    timeout = setTimeout(() => func(...args), wait) as any;
+  };
+}
+
 // Initialize Discord Adapter and Processor
 export const discordAdapter = new DiscordAdapter();
 
@@ -17,9 +29,13 @@ export function startInterfaces() {
   discordAdapter.onMessage(async (message) => {
     await discordProcessor.processMessage(message);
   });
-  whatsappAdapter.onMessage(async (message) => {
+
+  // Debounce WhatsApp messages with 500ms delay
+  const debouncedWhatsAppProcessor = debounce(async (message) => {
     await whatsappProcessor.processMessage(message);
-  });
+  }, 1000);
+
+  whatsappAdapter.onMessage(debouncedWhatsAppProcessor);
   startEventsServer();
 }
 

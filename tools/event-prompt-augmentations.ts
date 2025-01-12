@@ -13,8 +13,22 @@ export interface PromptAugmentationResult {
   updatedSystemPrompt?: string;
   message?: string;
   updatedTools?: RunnableToolFunctionWithParse<any>[];
-  attachedImageBase64?: string;
+  attachedImagesBase64?: string[]; // Changed to string array
   model: string;
+}
+
+/**
+ * Helper function to handle transcription of a single file or array of files
+ */
+async function handleTranscription(
+  input: File | File[]
+): Promise<string | string[]> {
+  if (Array.isArray(input)) {
+    return Promise.all(
+      input.map((file) => get_transcription(file as globalThis.File))
+    );
+  }
+  return get_transcription(input as globalThis.File);
 }
 
 /**
@@ -28,27 +42,103 @@ async function voiceEventAugmentation(
   baseTools: RunnableToolFunctionWithParse<any>[] | undefined,
   contextMessage: Message
 ): Promise<PromptAugmentationResult> {
-  let attachedImageBase64: string | undefined;
+  let attachedImagesBase64: string[] = []; // Changed to array
 
-  // Transcribe if there's an audio file
-  if (payload?.transcription && payload.transcription instanceof File) {
-    console.log("Transcribing audio for voice event listener.");
-    const file = payload.transcription;
-    payload.transcription = await get_transcription(file as globalThis.File);
+  // Handle transcription - single file or array
+  if (payload?.transcription) {
+    if (
+      payload.transcription instanceof File ||
+      Array.isArray(payload.transcription)
+    ) {
+      console.log("Transcribing audio(s) for voice event listener.");
+      payload.transcription = await handleTranscription(payload.transcription);
+    }
   }
 
-  // Check for an attached image
+  // Handle other_reference_data - single file or array
   const otherContextData = payload?.other_reference_data;
-  if (
-    otherContextData instanceof File &&
-    otherContextData.type.includes("image")
-  ) {
-    console.log("Got image in voice event payload; converting to base64...");
-    const buffer = await otherContextData.arrayBuffer();
-    attachedImageBase64 = `data:${otherContextData.type};base64,${Buffer.from(
-      buffer
-    ).toString("base64")}`;
+  if (otherContextData) {
+    if (Array.isArray(otherContextData)) {
+      const results = await Promise.all(
+        otherContextData.map(async (item) => {
+          if (item instanceof File) {
+            if (item.type.includes("audio")) {
+              return await get_transcription(item as globalThis.File);
+            } else if (item.type.includes("image")) {
+              const buffer = await item.arrayBuffer();
+              const imageBase64 = `data:${item.type};base64,${Buffer.from(
+                buffer
+              ).toString("base64")}`;
+              attachedImagesBase64.push(imageBase64); // Add to array
+              return imageBase64;
+            }
+          }
+          return item;
+        })
+      );
+      payload.other_reference_data = results;
+    } else if (otherContextData instanceof File) {
+      if (otherContextData.type.includes("audio")) {
+        payload.other_reference_data = await get_transcription(
+          otherContextData as globalThis.File
+        );
+      } else if (otherContextData.type.includes("image")) {
+        const buffer = await otherContextData.arrayBuffer();
+        const imageBase64 = `data:${otherContextData.type};base64,${Buffer.from(
+          buffer
+        ).toString("base64")}`;
+        attachedImagesBase64.push(imageBase64); // Add to array
+      }
+    }
   }
+
+  const files = payload?.files;
+  if (files) {
+    if (Array.isArray(files)) {
+      const results = await Promise.all(
+        files.map(async (file) => {
+          if (file instanceof File) {
+            if (file.type.includes("audio")) {
+              const res = await get_transcription(file as globalThis.File);
+              return `transcript of file: ${file.name}:
+              
+              ${res}
+              `
+            } else if (file.type.includes("image")) {
+              const buffer = await file.arrayBuffer();
+              const imageBase64 = `data:${file.type};base64,${Buffer.from(
+                buffer
+              ).toString("base64")}`;
+              attachedImagesBase64.push(imageBase64); // Add to array
+              return `image file: ${file.name}`;
+            }
+          }
+          return file;
+        })
+      );
+      payload.files = results;
+    } else if (files instanceof File) {
+      if (files.type.includes("audio")) {
+        // payload.files = await get_transcription(files as globalThis.File);
+        const res = await get_transcription(files as globalThis.File);
+        payload.files = `transcript of file: ${files.name}:
+
+        ${res}
+        `;
+
+      } else if (files.type.includes("image")) {
+        const buffer = await files.arrayBuffer();
+        const imageBase64 = `data:${files.type};base64,${Buffer.from(
+          buffer
+        ).toString("base64")}`;
+        attachedImagesBase64.push(imageBase64); // Add to array
+        payload.files = `image file: ${files.name}`;
+      }
+    }
+  }
+
+  // console.log("Payload: ", payload);
+  // console.log("IMages: ", attachedImagesBase64);
 
   let message = `
 You are in voice trigger mode.
@@ -72,7 +162,7 @@ Your response must be in plain text without extra formatting or Markdown.
     updatedSystemPrompt: prompt,
     message,
     updatedTools: tools,
-    attachedImageBase64,
+    attachedImagesBase64, // Now returning array
     model: "gpt-4o",
   };
 }
@@ -147,7 +237,7 @@ async function defaultAugmentation(
 ): Promise<PromptAugmentationResult> {
   return {
     updatedTools: baseTools,
-    attachedImageBase64: undefined,
+    attachedImagesBase64: [], // Changed to empty array
     model: "gpt-4o-mini",
   };
 }
@@ -187,7 +277,7 @@ export async function buildPromptAndToolsForEvent(
   finalPrompt: string;
   message?: string;
   finalTools: RunnableToolFunctionWithParse<any>[] | undefined;
-  attachedImage?: string;
+  attachedImages?: string[];
   model?: string;
 }> {
   console.log(`Building prompt for event: ${eventId}`);
@@ -227,11 +317,10 @@ You are called when an event triggers. Your task is to execute the user's instru
 - **Event ID:** ${eventId}
 - **Description:** ${description}
 - **Payload:** ${JSON.stringify(payload, null, 2)}
-- **Will Auto Notify Creator of Listener:** ${
-    notify
+- **Will Auto Notify Creator of Listener:** ${notify
       ? "Yes, no need to send it yourself"
       : "No, you need to notify the user manually"
-  }
+    }
 - **Instruction:** ${instruction}
 
 **Action Required:**
@@ -257,7 +346,7 @@ You are called when an event triggers. Your task is to execute the user's instru
   const {
     additionalSystemPrompt,
     updatedTools,
-    attachedImageBase64,
+    attachedImagesBase64,
     updatedSystemPrompt,
     model,
     message,
@@ -271,7 +360,7 @@ You are called when an event triggers. Your task is to execute the user's instru
   return {
     finalPrompt: updatedSystemPrompt || finalPrompt,
     finalTools: updatedTools,
-    attachedImage: attachedImageBase64,
+    attachedImages: attachedImagesBase64,
     model,
     message,
   };

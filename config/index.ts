@@ -7,12 +7,12 @@ export const pathInDataDir = (filename: string) => path.join(dataDir, filename);
 
 interface PlatformIdentity {
   platform:
-    | "discord"
-    | "whatsapp"
-    | "email"
-    | "events"
-    | "linear_key"
-    | "linear_email";
+  | "discord"
+  | "whatsapp"
+  | "email"
+  | "events"
+  | "linear_key"
+  | "linear_email";
   id: string; // Platform-specific user ID
 }
 
@@ -61,13 +61,28 @@ const ConfigSchema = z.object({
   rolePermissions: z.record(z.string(), z.array(z.string())),
 });
 
-// Load user configuration data from file
-const userConfigPath = pathInDataDir("user-config.json");
-const rawData = fs.readFileSync(userConfigPath, "utf-8");
-const parsedData = JSON.parse(rawData);
+// Mutable exports that will be updated
+export let userConfigs: UserConfig[] = [];
+export let rolePermissions: Record<string, string[]> = {};
 
-// Validate the parsed JSON using the Zod schema
-const configData = ConfigSchema.parse(parsedData);
+// Function to load config
+function loadConfig() {
+  try {
+    const userConfigPath = pathInDataDir("user-config.json");
+    const rawData = fs.readFileSync(userConfigPath, "utf-8");
+    const parsedData = JSON.parse(rawData);
+    const configData = ConfigSchema.parse(parsedData);
 
-// Export the validated data
-export const { users: userConfigs, rolePermissions } = configData;
+    // Update the exported variables
+    userConfigs = configData.users;
+    rolePermissions = configData.rolePermissions;
+  } catch (error) {
+    console.error("Error loading config:", error);
+  }
+}
+
+// Initial load
+loadConfig();
+
+// Setup auto-reload every minute
+setInterval(loadConfig, 60 * 1000);

@@ -17,13 +17,13 @@ const CommunicationManagerSchema = z.object({
     .describe(
       "The platform you prefer to use, you can leave this empty to default to the current user's platform."
     ),
-  prefered_recipient_details: z
-    .object({
-      name: z.string().optional(),
-      user_id: z.string().optional(),
-    })
-    .optional()
-    .describe("Give these details only if you have them."),
+  // prefered_recipient_details: z
+  //   .object({
+  //     name: z.string().optional(),
+  //     user_id: z.string().optional(),
+  //   })
+  //   .optional()
+  //   .describe("Give these details only if you have them."),
 });
 
 export type CommunicationManager = z.infer<typeof CommunicationManagerSchema>;
@@ -70,7 +70,7 @@ export async function communication_manager(
   {
     request,
     prefered_platform,
-    prefered_recipient_details,
+    // prefered_recipient_details,
   }: CommunicationManager,
   context_message: Message
 ) {
@@ -78,27 +78,61 @@ export async function communication_manager(
     memory_manager_init(context_message, "communications_manager")
   );
 
-  const prompt = `You are a Communication Manager Tool.
+  const prompt = `You are a Communication Manager Tool responsible for routing messages to the correct recipients.
 
-Your task is to route messages to the correct recipient.
+CONTEXT INFORMATION:
+1. Current User (Sender): ${context_message.author.config?.name}
+2. Current Platform: ${context_message.platform}
+3. WhatsApp Access: ${context_message.getUserRoles().includes("creator")}
+4. Available Platforms: discord, whatsapp, email
 
----
+STEP-BY-STEP PROCESS:
+1. First, identify the recipient(s) from the request
+2. Then, check if recipient exists in this list of known users:
+${JSON.stringify(userConfigs, null, 2)}
+
+3. If recipient not found in above list:
+   - Use search_user tool to find them
+   - Wait for search results before proceeding
+
+4. Platform Selection:
+   - If prefered_platform is specified, use that
+   - If not specified, use current platform: ${context_message.platform}
+   - For WhatsApp, verify you have creator access first
+
+TOOLS AVAILABLE:
+- search_user: Find user details by name
+- send_message_to: Send message on discord/whatsapp
+- send_email: Send emails (requires verified email address)
+- memory_manager: Store user preferences and contact names
 
 ${memory_manager_guide("communications_manager", context_message.author.id)}
 
-You can use the \`memory_manager\` tool to remember user preferences, such as what the user calls certain contacts, to help you route messages better.
+MESSAGE DELIVERY GUIDELINES:
+Act as a professional assistant delivering messages between people. Consider:
 
----
+1. Relationship Context:
+   - Professional for workplace communications
+   - Casual for friends and family
+   - Respectful for all contexts
 
-**Default Platform (if not mentioned):** ${context_message.platform}
+2. Message Delivery Style:
+   - Frame the message naturally as an assistant would when passing along information
+   - Maintain the original intent and tone of the sender
+   - Add appropriate context without changing the core message
 
-**Configuration of All Users:** ${JSON.stringify(userConfigs)}
+3. Natural Communication:
+   - Deliver messages as if you're the assistant of the user: ${context_message.author.config?.name}.
+   - Adapt your tone based on the message urgency and importance
+   - Include relevant context when delivering reminders or requests
+   - Keep the human element in the communication
 
-**Can Access 'WhatsApp':** ${context_message.getUserRoles().includes("creator")}
+Remember: You're not just forwarding messages, you're acting as a professional assistant helping facilitate communication between people. Make your delivery natural and appropriate for each situation.
 
-**Guidelines:**
-
-- If the user does not mention a platform, use the same platform as the current user.
+ERROR PREVENTION:
+- Don't halucinate or invent contact details
+- Always verify platform availability before sending
+- If unsure about recipient, ask for clarification
 `;
 
   const response = await ask({
@@ -106,9 +140,7 @@ You can use the \`memory_manager\` tool to remember user preferences, such as wh
     model: "gpt-4o-mini",
     message: `request: ${request}
 
-    prefered_platform: ${prefered_platform}
-    
-    prefered_recipient_details: ${JSON.stringify(prefered_recipient_details)}`,
+    prefered_platform: ${prefered_platform}`,
     tools,
   });
 
@@ -128,13 +160,11 @@ export const communication_manager_tool = (context_message: Message) =>
     function: (args) => communication_manager(args, context_message),
     name: "communication_manager",
     schema: CommunicationManagerSchema,
-    description: `Communications Manager.
+    description: `Sends messages to one or more recipients across different platforms (discord, whatsapp, email).
 
-This tool routes messages to the specified user on the appropriate platform.
+Input format:
+request: "send [message] to [recipient(s)]"
+prefered_platform: (optional) platform name
 
-Use it to send messages to users on various platforms.
-
-Provide detailed information to ensure the message reaches the correct recipient.
-
-Include in your request the full message content and its context along with the recipient's details.`,
+The tool handles recipient lookup, message composition, and delivery automatically.`,
   });

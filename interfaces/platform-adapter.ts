@@ -1,5 +1,5 @@
 import { UserConfig } from "../config";
-import { Message, User } from "./message";
+import { Attachment, Message, User } from "./message";
 
 export interface FetchOptions {
   limit?: number;
@@ -25,4 +25,9 @@ export interface PlatformAdapter {
       processing: boolean;
     };
   };
+  handleMediaAttachment?(attachment: Attachment): Promise<{
+    base64?: string;
+    transcription?: string;
+    mediaType: 'image' | 'audio' | 'other';
+  }>;
 }

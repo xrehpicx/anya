@@ -18,6 +18,7 @@ import {
   DMChannel,
 } from "discord.js";
 import { UserConfig, userConfigs } from "../config";
+import { get_transcription } from "../tools/ask";  // Add this import
 
 export class DiscordAdapter implements PlatformAdapter {
   private client: Client;
@@ -254,6 +255,33 @@ export class DiscordAdapter implements PlatformAdapter {
   // Expose getMessageInterface method
   public getMessageInterface = this.createMessageInterface;
 
+  public async handleMediaAttachment(attachment: Attachment) {
+    if (!attachment.url) return { mediaType: 'other' as const };
+
+    const response = await fetch(attachment.url);
+    const buffer = await response.arrayBuffer();
+
+    if (attachment.contentType?.includes('image')) {
+      const base64 = `data:${attachment.contentType};base64,${Buffer.from(buffer).toString('base64')}`;
+      return {
+        base64,
+        mediaType: 'image' as const
+      };
+    }
+
+    if (attachment.contentType?.includes('audio')) {
+      // Create temporary file for transcription
+      const tempFile = new File([buffer], 'audio', { type: attachment.contentType });
+      const transcription = await get_transcription(tempFile);
+      return {
+        transcription,
+        mediaType: 'audio' as const
+      };
+    }
+
+    return { mediaType: 'other' as const };
+  }
+
   private async convertMessage(
     discordMessage: DiscordMessage
   ): Promise<StdMessage> {
@@ -263,10 +291,19 @@ export class DiscordAdapter implements PlatformAdapter {
       config: this.getUserById(discordMessage.author.id),
     };
 
-    const attachments: Attachment[] = discordMessage.attachments.map(
-      (attachment) => ({
-        url: attachment.url,
-        contentType: attachment.contentType || undefined,
+    const attachments: Attachment[] = await Promise.all(
+      discordMessage.attachments.map(async (attachment) => {
+        const stdAttachment: Attachment = {
+          url: attachment.url,
+          contentType: attachment.contentType || undefined,
+        };
+
+        const processedMedia = await this.handleMediaAttachment(stdAttachment);
+        if (processedMedia.base64) stdAttachment.base64 = processedMedia.base64;
+        if (processedMedia.transcription) stdAttachment.transcription = processedMedia.transcription;
+        stdAttachment.mediaType = processedMedia.mediaType;
+
+        return stdAttachment;
       })
     );
 
@@ -402,7 +439,7 @@ export class DiscordAdapter implements PlatformAdapter {
   // Helper method to safely send messages with length checks
   private async safeSend(
     target: TextChannel | DiscordUser,
-    messageData: string | { content?: string; [key: string]: any }
+    messageData: string | { content?: string;[key: string]: any }
   ): Promise<DiscordMessage> {
     let content: string | undefined;
     if (typeof messageData === "string") {
@@ -432,7 +469,7 @@ export class DiscordAdapter implements PlatformAdapter {
   // Helper method to safely reply with length checks
   private async safeReply(
     message: DiscordMessage,
-    messageData: string | { content?: string; [key: string]: any }
+    messageData: string | { content?: string;[key: string]: any }
   ): Promise<DiscordMessage> {
     let content: string | undefined;
     if (typeof messageData === "string") {
@@ -456,7 +493,7 @@ export class DiscordAdapter implements PlatformAdapter {
   // Helper method to safely edit messages with length checks
   private async safeEdit(
     message: DiscordMessage,
-    data: string | { content?: string; [key: string]: any }
+    data: string | { content?: string;[key: string]: any }
   ): Promise<DiscordMessage> {
     let content: string | undefined;
     if (typeof data === "string") {

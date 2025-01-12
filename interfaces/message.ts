@@ -19,6 +19,9 @@ export interface Attachment {
   contentType?: string;
   data?: Buffer | string;
   type?: string;
+  mediaType?: 'image' | 'audio' | 'other';
+  base64?: string;
+  transcription?: string;
 }
 
 export interface Embed {
@@ -31,10 +34,10 @@ export interface MessageData {
   options?: any;
   flags?: any;
   file?:
-    | {
-        url: string;
-      }
-    | { path: string };
+  | {
+    url: string;
+  }
+  | { path: string };
 }
 
 export interface Message {

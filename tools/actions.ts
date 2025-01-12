@@ -19,6 +19,9 @@ import { memory_manager_guide, memory_manager_init } from "./memory-manager";
 // Paths to the JSON files
 const ACTIONS_FILE_PATH = pathInDataDir("actions.json");
 
+// Add this constant at the top with other constants
+const MIN_SCHEDULE_INTERVAL_SECONDS = 600; // 10 minutes in seconds
+
 // Define schema for creating an action
 export const CreateActionParams = z.object({
   actionId: z
@@ -347,6 +350,13 @@ export async function create_action(
   let { actionId, description, schedule, instruction, tool_names } =
     parsed.data;
 
+  // Validate schedule frequency
+  if (!validateScheduleFrequency(schedule)) {
+    return {
+      error: "❌ Schedule frequency cannot be less than 10 minutes. Please adjust the schedule."
+    };
+  }
+
   // Get the userId from contextMessage
   const userId: string = contextMessage.author.id;
 
@@ -484,6 +494,13 @@ export async function update_action(
     notify,
   } = parsed.data;
 
+  // Validate schedule frequency
+  if (!validateScheduleFrequency(schedule)) {
+    return {
+      error: "❌ Schedule frequency cannot be less than 10 minutes. Please adjust the schedule."
+    };
+  }
+
   // Get the userId from contextMessage
   const userId: string = contextMessage.author.id;
 
@@ -534,16 +551,25 @@ const action_tools: (
     schema: CreateActionParams,
     description: `Creates a new action.
 
+**IMPORTANT SCHEDULING LIMITATION:**
+Actions CANNOT be scheduled more frequently than once every 10 minutes. This is a hard system limitation that cannot be overridden.
+- For delays: Minimum delay is 600 seconds (10 minutes)
+- For cron: Must have at least 10 minutes between executions
+
 **Example:**
-- **User:** "Send a summary email in 10 minutes"
+- **User:** "Send a summary email every 10 minutes"
   - **Action ID:** "send_summary_email"
-  - **Description:** "Sends a summary email after a delay."
-  - **Schedule:** { type: "delay", time: 600 }
+  - **Description:** "Sends a summary email periodically"
+  - **Schedule:** { type: "cron", time: "*/10 * * * *" }
   - **Instruction:** "Compose and send a summary email to the user."
   - **Required Tools:** ["email_service"]
 
-**Notes:**
-- Supported scheduling types: 'delay' (in seconds), 'cron' (cron expressions).
+**Invalid Examples:**
+❌ Every 5 minutes: "*/5 * * * *"
+❌ Delay of 300 seconds
+❌ Multiple times within 10 minutes
+
+The system will automatically reject any schedule that attempts to run more frequently than every 10 minutes.
 `,
   }),
   //   zodFunction({
@@ -707,6 +733,42 @@ Use the data provided above to fulfill the user's request.
     return {
       error: "❌ An error occurred while executing your request.",
     };
+  }
+}
+
+// Replace the existing validateCronFrequency function with this more comprehensive one
+function validateScheduleFrequency(schedule: { type: "delay" | "cron"; time: number | string }): boolean {
+  try {
+    if (schedule.type === "delay") {
+      const delaySeconds = schedule.time as number;
+      return delaySeconds >= MIN_SCHEDULE_INTERVAL_SECONDS;
+    } else if (schedule.type === "cron") {
+      const cronExpression = schedule.time as string;
+      const intervals = cronExpression.split(' ');
+
+      // Check minutes field (first position)
+      const minutesPart = intervals[0];
+      if (minutesPart === '*') return false;
+      if (minutesPart.includes('/')) {
+        const step = parseInt(minutesPart.split('/')[1]);
+        if (step < 10) return false;
+      }
+      // Convert specific minute values to ensure they're at least 10 minutes apart
+      if (!minutesPart.includes('/')) {
+        const minutes = minutesPart.split(',').map(Number);
+        if (minutes.length > 1) {
+          minutes.sort((a, b) => a - b);
+          for (let i = 1; i < minutes.length; i++) {
+            if (minutes[i] - minutes[i - 1] < 10) return false;
+          }
+          if ((60 - minutes[minutes.length - 1] + minutes[0]) < 10) return false;
+        }
+      }
+      return true;
+    }
+    return false;
+  } catch {
+    return false;
   }
 }
 

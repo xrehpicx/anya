@@ -133,12 +133,12 @@ export async function ask({
   tools,
   seed,
   json,
-  image_url,
+  image_urls, // Changed from image_url to image_urls array
 }: {
   model?: string;
   prompt: string;
   message?: string;
-  image_url?: string;
+  image_urls?: string[]; // Changed to array of strings
   name?: string;
   tools?: RunnableToolFunctionWithParse<any>[];
   seed?: string;
@@ -166,6 +166,22 @@ export async function ask({
     // Retrieve existing message history
     const history = getMessageHistory(seed);
 
+    let messageContent: any = message;
+    if (image_urls && image_urls.length > 0) {
+      messageContent = [
+        {
+          type: "text",
+          text: message,
+        },
+        ...image_urls.map((url) => ({
+          type: "image_url",
+          image_url: {
+            url: url,
+          },
+        })),
+      ];
+    }
+
     // Combine system prompt with message history and new user message
     messages = [
       {
@@ -175,24 +191,11 @@ export async function ask({
       ...history,
       {
         role: "user",
-        content: image_url
-          ? [
-              {
-                type: "text",
-                text: message,
-              },
-              {
-                type: "image_url",
-                image_url: {
-                  url: image_url,
-                },
-              },
-            ]
-          : message,
+        content: messageContent,
         name,
       },
     ];
-    image_url && console.log("got image:", image_url?.slice(0, 20));
+    image_urls && console.log("got images:", image_urls.length);
   } else if (seed && !message) {
     // If seed is provided but no new message, just retrieve history
     const history = getMessageHistory(seed);
@@ -205,22 +208,25 @@ export async function ask({
     ];
   } else if (!seed && message) {
     // If no seed but message is provided, send system prompt and user message without history
+    let messageContent: any = message;
+    if (image_urls && image_urls.length > 0) {
+      messageContent = [
+        {
+          type: "text",
+          text: message,
+        },
+        ...image_urls.map((url) => ({
+          type: "image_url",
+          image_url: {
+            url: url,
+          },
+        })),
+      ];
+    }
+
     messages.push({
       role: "user",
-      content: image_url
-        ? [
-            {
-              type: "text",
-              text: message,
-            },
-            {
-              type: "image_url",
-              image_url: {
-                url: image_url,
-              },
-            },
-          ]
-        : message,
+      content: messageContent,
       name,
     });
   }

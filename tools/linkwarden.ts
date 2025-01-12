@@ -416,7 +416,7 @@ ${memory_manager_guide("links_manager", context_message.author.id)}
 ----
     `,
     message: request,
-    seed: "link-${context_message.channelId}",
+    seed: `link-${context_message.channelId}`,
     tools: link_tools.concat(
       memory_manager_init(context_message, "links_manager")
     ) as any,
