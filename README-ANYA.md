@@ -27,7 +27,7 @@ curl -fsSL https://raw.githubusercontent.com/xrehpicx/anya/main/scripts/install/
 
 ```sh
 cd codex-rs
-cargo build -p anya
+cargo build -p codex-anya
 ```
 
 The resulting `target/debug/anya` binary contains the Anya CLI, the embedded

@@ -43,7 +43,7 @@ jobs:
 
       - name: Build anya
         working-directory: codex-rs
-        run: cargo build --release -p anya --target "${{ matrix.target }}"
+        run: cargo build --release -p codex-anya --target "${{ matrix.target }}"
 
       - name: Package
         shell: bash

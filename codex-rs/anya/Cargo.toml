@@ -1,9 +1,12 @@
 [package]
-name = "anya"
+name = "codex-anya"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Minimal service and channel CLI for running Codex as Anya."
+
+[lints]
+workspace = true
 
 [[bin]]
 name = "anya"
