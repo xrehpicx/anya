@@ -1,0 +1,76 @@
+name: Anya release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "anya-v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-13
+            target: x86_64-apple-darwin
+          - os: macos-14
+            target: aarch64-apple-darwin
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: codex-rs
+          key: anya-${{ matrix.target }}
+
+      - name: Build anya
+        working-directory: codex-rs
+        run: cargo build --release -p anya --target "${{ matrix.target }}"
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="${{ matrix.target }}"
+          stage="${RUNNER_TEMP}/anya-${target}"
+          mkdir -p "${stage}"
+          cp "codex-rs/target/${target}/release/anya" "${stage}/anya"
+          cp README-ANYA.md "${stage}/README-ANYA.md"
+          cp LICENSE "${stage}/LICENSE"
+          tar -C "${stage}" -czf "anya-${target}.tar.gz" anya README-ANYA.md LICENSE
+          shasum -a 256 "anya-${target}.tar.gz" > "anya-${target}.tar.gz.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: anya-${{ matrix.target }}
+          path: |
+            anya-${{ matrix.target }}.tar.gz
+            anya-${{ matrix.target }}.tar.gz.sha256
+          if-no-files-found: error
+
+      - name: Upload release assets
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            anya-${{ matrix.target }}.tar.gz
+            anya-${{ matrix.target }}.tar.gz.sha256

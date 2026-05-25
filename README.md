@@ -1,3 +1,29 @@
+<p align="center"><strong>Anya</strong> is a single-binary service and CLI agent forked from Codex.
+</p>
+
+## Install Anya
+
+Run the following on macOS or Linux:
+
+```shell
+curl -fsSL https://raw.githubusercontent.com/xrehpicx/anya/main/scripts/install/install-anya.sh | sh
+```
+
+The installer downloads the matching `anya` release artifact and installs it to
+`$HOME/.local/bin/anya` by default. Set `ANYA_INSTALL_DIR` to choose another
+directory:
+
+```shell
+curl -fsSL https://raw.githubusercontent.com/xrehpicx/anya/main/scripts/install/install-anya.sh | ANYA_INSTALL_DIR=/usr/local/bin sh
+```
+
+See [README-ANYA.md](README-ANYA.md) for Anya service, channel, session, and TUI
+commands.
+
+---
+
+The upstream Codex README follows.
+
 <p align="center"><strong>Codex CLI</strong> is a coding agent from OpenAI that runs locally on your computer.
 <p align="center">
   <img src="https://github.com/openai/codex/blob/main/.github/codex-cli-splash.png" alt="Codex CLI splash" width="80%" />
