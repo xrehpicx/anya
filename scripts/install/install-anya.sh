@@ -16,6 +16,7 @@ Environment:
   ANYA_INSTALL_DIR  Install directory. Defaults to \$HOME/.local/bin.
   ANYA_RELEASE      Release tag or "latest". Defaults to latest.
   ANYA_REPO         GitHub repository. Defaults to xrehpicx/anya.
+  ANYA_NO_RUSTUP    Set to 1 to fail instead of installing Rust for source builds.
 EOF
 }
 
@@ -162,13 +163,22 @@ install_from_source() {
   fi
 
   if ! command -v cargo >/dev/null 2>&1; then
-    cat >&2 <<EOF
+    if [ "${ANYA_NO_RUSTUP:-0}" = "1" ]; then
+      cat >&2 <<EOF
 No Anya release binary exists yet for $TARGET, and cargo was not found.
 
-Install Rust first, then rerun this installer:
+Unset ANYA_NO_RUSTUP or install Rust first, then rerun this installer:
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 EOF
-    exit 1
+      exit 1
+    fi
+
+    printf 'No release binary found and cargo is missing. Installing Rust with rustup.\n'
+    rustup_script="$TMP_DIR/rustup-init.sh"
+    download "https://sh.rustup.rs" "$rustup_script"
+    sh "$rustup_script" -y --profile minimal
+    PATH="$HOME/.cargo/bin:$PATH"
+    export PATH
   fi
 
   source_url="$(source_archive_url)"
