@@ -1,9 +1,5 @@
 name: rust-ci-full
 on:
-  push:
-    branches:
-      - main
-      - "**full-ci**"
   workflow_dispatch:
 
 # CI builds in debug (dev) for faster signal.
