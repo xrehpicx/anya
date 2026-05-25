@@ -29,8 +29,20 @@ pub fn systemd_unit(args: &ServiceUnitArgs) -> String {
         args.listen
     ));
     unit.push_str("\n[Install]\n");
-    unit.push_str("WantedBy=multi-user.target\n");
+    unit.push_str(&format!("WantedBy={}\n", wanted_by_target(args)));
     unit
+}
+
+fn wanted_by_target(args: &ServiceUnitArgs) -> &'static str {
+    if args
+        .systemd_dir
+        .components()
+        .any(|component| component.as_os_str() == "user")
+    {
+        "default.target"
+    } else {
+        "multi-user.target"
+    }
 }
 
 pub async fn install_systemd_unit(args: &ServiceUnitArgs) -> Result<()> {
@@ -87,6 +99,38 @@ mod tests {
                 "\n",
                 "[Install]\n",
                 "WantedBy=multi-user.target\n",
+            )
+        );
+    }
+
+    #[test]
+    fn user_systemd_unit_uses_default_target() {
+        let args = ServiceUnitArgs {
+            name: "anya".to_string(),
+            binary: PathBuf::from("/home/raj/.local/bin/anya"),
+            listen: "ws://127.0.0.1:4827".to_string(),
+            systemd_dir: PathBuf::from("/home/raj/.config/systemd/user"),
+            user: None,
+            working_directory: None,
+        };
+
+        let unit = systemd_unit(&args);
+
+        assert_eq!(
+            unit,
+            concat!(
+                "[Unit]\n",
+                "Description=Anya agent service\n",
+                "After=network-online.target\n",
+                "Wants=network-online.target\n\n",
+                "[Service]\n",
+                "Type=simple\n",
+                "Restart=on-failure\n",
+                "RestartSec=2s\n",
+                "ExecStart=/home/raj/.local/bin/anya serve --listen ws://127.0.0.1:4827\n",
+                "\n",
+                "[Install]\n",
+                "WantedBy=default.target\n",
             )
         );
     }
