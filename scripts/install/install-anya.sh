@@ -76,6 +76,24 @@ download() {
   exit 1
 }
 
+download_if_available() {
+  url="$1"
+  output="$2"
+
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$url" -o "$output"
+    return
+  fi
+
+  if command -v wget >/dev/null 2>&1; then
+    wget -q -O "$output" "$url"
+    return
+  fi
+
+  echo "curl or wget is required to install Anya." >&2
+  exit 1
+}
+
 resolve_target() {
   os="$(uname -s)"
   arch="$(uname -m)"
@@ -117,6 +135,58 @@ release_base_url() {
   fi
 }
 
+source_archive_url() {
+  if [ "$RELEASE" = "latest" ]; then
+    printf 'https://github.com/%s/archive/refs/heads/main.tar.gz\n' "$REPO"
+  else
+    printf 'https://github.com/%s/archive/refs/tags/%s.tar.gz\n' "$REPO" "$RELEASE"
+  fi
+}
+
+install_from_archive() {
+  tar -xzf "$ARCHIVE" -C "$TMP_DIR"
+
+  if [ ! -f "$TMP_DIR/anya" ]; then
+    echo "Downloaded archive did not contain an anya binary." >&2
+    exit 1
+  fi
+
+  mkdir -p "$BIN_DIR"
+  install -m 0755 "$TMP_DIR/anya" "$BIN_PATH"
+}
+
+install_from_source() {
+  if ! command -v cargo >/dev/null 2>&1 && [ -x "$HOME/.cargo/bin/cargo" ]; then
+    PATH="$HOME/.cargo/bin:$PATH"
+    export PATH
+  fi
+
+  if ! command -v cargo >/dev/null 2>&1; then
+    cat >&2 <<EOF
+No Anya release binary exists yet for $TARGET, and cargo was not found.
+
+Install Rust first, then rerun this installer:
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+EOF
+    exit 1
+  fi
+
+  source_url="$(source_archive_url)"
+  source_archive="$TMP_DIR/anya-source.tar.gz"
+  printf 'No release binary found. Building Anya from source at %s\n' "$source_url"
+  download "$source_url" "$source_archive"
+  mkdir -p "$TMP_DIR/source"
+  tar -xzf "$source_archive" -C "$TMP_DIR/source" --strip-components 1
+
+  (
+    cd "$TMP_DIR/source/codex-rs"
+    cargo build --release -p codex-anya
+  )
+
+  mkdir -p "$BIN_DIR"
+  install -m 0755 "$TMP_DIR/source/codex-rs/target/release/anya" "$BIN_PATH"
+}
+
 TARGET="$(resolve_target)"
 ASSET="anya-$TARGET.tar.gz"
 URL="$(release_base_url)/$ASSET"
@@ -125,17 +195,11 @@ TMP_DIR="$(mktemp -d)"
 ARCHIVE="$TMP_DIR/$ASSET"
 
 printf 'Installing Anya for %s from %s\n' "$TARGET" "$URL"
-download "$URL" "$ARCHIVE"
-
-tar -xzf "$ARCHIVE" -C "$TMP_DIR"
-
-if [ ! -f "$TMP_DIR/anya" ]; then
-  echo "Downloaded archive did not contain an anya binary." >&2
-  exit 1
+if download_if_available "$URL" "$ARCHIVE"; then
+  install_from_archive
+else
+  install_from_source
 fi
-
-mkdir -p "$BIN_DIR"
-install -m 0755 "$TMP_DIR/anya" "$BIN_PATH"
 
 printf 'Installed %s\n' "$BIN_PATH"
 case ":$PATH:" in
