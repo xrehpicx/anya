@@ -13,6 +13,14 @@ use clap::Parser;
 use clap::Subcommand;
 use codex_arg0::Arg0DispatchPaths;
 use codex_arg0::arg0_dispatch_or_else;
+use codex_cli::read_access_token_from_stdin;
+use codex_cli::read_api_key_from_stdin;
+use codex_cli::run_login_status;
+use codex_cli::run_login_with_access_token;
+use codex_cli::run_login_with_api_key;
+use codex_cli::run_login_with_chatgpt;
+use codex_cli::run_login_with_device_code;
+use codex_cli::run_logout;
 use codex_config::LoaderOverrides;
 use codex_protocol::protocol::SessionSource;
 use codex_tui::AppExitInfo;
@@ -40,6 +48,10 @@ struct Cli {
 enum CommandKind {
     /// Run the Codex app-server in the foreground under the Anya service name.
     Serve(ServeArgs),
+    /// Manage login for the embedded Codex agent.
+    Login(LoginArgs),
+    /// Remove stored authentication credentials for the embedded Codex agent.
+    Logout(LogoutArgs),
     /// Install or print a systemd unit for Anya.
     Service(ServiceArgs),
     /// Create, list, and bind generalized chat channels to Codex threads.
@@ -65,6 +77,44 @@ struct ServeArgs {
     /// Session source passed through to Codex.
     #[arg(long, default_value = "vscode")]
     session_source: String,
+}
+
+#[derive(Debug, Args)]
+struct LoginArgs {
+    #[clap(flatten)]
+    config_overrides: CliConfigOverrides,
+
+    #[arg(long = "with-api-key")]
+    with_api_key: bool,
+
+    #[arg(long = "with-access-token")]
+    with_access_token: bool,
+
+    #[arg(long = "device-auth")]
+    use_device_code: bool,
+
+    /// EXPERIMENTAL: Use custom OAuth issuer base URL.
+    #[arg(long = "experimental_issuer", value_name = "URL", hide = true)]
+    issuer_base_url: Option<String>,
+
+    /// EXPERIMENTAL: Use custom OAuth client ID.
+    #[arg(long = "experimental_client-id", value_name = "CLIENT_ID", hide = true)]
+    client_id: Option<String>,
+
+    #[command(subcommand)]
+    action: Option<LoginSubcommand>,
+}
+
+#[derive(Debug, Subcommand)]
+enum LoginSubcommand {
+    /// Show login status.
+    Status,
+}
+
+#[derive(Debug, Args)]
+struct LogoutArgs {
+    #[clap(flatten)]
+    config_overrides: CliConfigOverrides,
 }
 
 #[derive(Debug, Args)]
@@ -168,6 +218,8 @@ fn main() -> Result<()> {
 async fn run(arg0_paths: Arg0DispatchPaths) -> Result<()> {
     match Cli::parse().command {
         CommandKind::Serve(args) => serve(args, arg0_paths).await,
+        CommandKind::Login(args) => login(args).await,
+        CommandKind::Logout(args) => logout(args).await,
         CommandKind::Service(args) => service(args).await,
         CommandKind::Channel(args) => channel(args).await,
         CommandKind::SessionCreate(args) => session_create(args).await,
@@ -176,6 +228,40 @@ async fn run(arg0_paths: Arg0DispatchPaths) -> Result<()> {
         CommandKind::Tui(args) => tui(args, arg0_paths).await,
         CommandKind::Rpc(args) => rpc(args).await,
     }
+}
+
+async fn login(args: LoginArgs) -> Result<()> {
+    match args.action {
+        Some(LoginSubcommand::Status) => run_login_status(args.config_overrides).await,
+        None => {
+            if args.with_api_key && args.with_access_token {
+                anyhow::bail!(
+                    "choose one login credential source: --with-api-key or --with-access-token"
+                );
+            }
+            if args.use_device_code {
+                run_login_with_device_code(
+                    args.config_overrides,
+                    args.issuer_base_url,
+                    args.client_id,
+                )
+                .await;
+            }
+            if args.with_api_key {
+                let api_key = read_api_key_from_stdin();
+                run_login_with_api_key(args.config_overrides, api_key).await;
+            }
+            if args.with_access_token {
+                let access_token = read_access_token_from_stdin();
+                run_login_with_access_token(args.config_overrides, access_token).await;
+            }
+            run_login_with_chatgpt(args.config_overrides).await;
+        }
+    }
+}
+
+async fn logout(args: LogoutArgs) -> Result<()> {
+    run_logout(args.config_overrides).await;
 }
 
 async fn serve(args: ServeArgs, arg0_paths: Arg0DispatchPaths) -> Result<()> {
