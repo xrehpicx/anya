@@ -71,9 +71,42 @@ anya tui --channel ops
 ```sh
 anya session-create --channel main
 anya session-send --channel main "inspect this repo"
+anya session-send --channel main --wait "reply with pong"
 anya channel list
 anya rpc model/list
 ```
+
+## WhatsApp Bridge
+
+Anya can install a small WhatsApp Web bridge based on Baileys. It maps each
+WhatsApp chat or group to a persistent Anya channel named
+`whatsapp:<whatsapp-jid>`. Direct messages always go to Anya. In groups, Anya
+only responds when the message starts with `anya`, `/anya`, `/ask`, or mentions
+the bot account.
+
+Install bridge files and Node dependencies:
+
+```sh
+anya whatsapp install
+```
+
+Run it in the foreground and scan the QR code from WhatsApp:
+
+```sh
+anya whatsapp bridge
+```
+
+For a user systemd unit:
+
+```sh
+mkdir -p ~/.config/systemd/user
+anya whatsapp print-service --anya-binary ~/.local/bin/anya > ~/.config/systemd/user/anya-whatsapp.service
+systemctl --user daemon-reload
+systemctl --user enable --now anya-whatsapp.service
+```
+
+To use it in a WhatsApp group, add the paired WhatsApp account to the group and
+send messages such as `anya summarize this chat`.
 
 ## Install as a systemd Service
 

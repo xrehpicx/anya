@@ -1,6 +1,7 @@
 mod channel;
 mod codex_rpc;
 mod service;
+mod whatsapp;
 
 use std::io::BufRead;
 use std::io::Write;
@@ -54,6 +55,8 @@ enum CommandKind {
     Logout(LogoutArgs),
     /// Install or print a systemd unit for Anya.
     Service(ServiceArgs),
+    /// Install and run the WhatsApp bridge channel.
+    Whatsapp(whatsapp::WhatsappArgs),
     /// Create, list, and bind generalized chat channels to Codex threads.
     Channel(ChannelArgs),
     /// Create a Codex thread through the running app server.
@@ -180,6 +183,8 @@ struct SessionSendArgs {
     thread_id: Option<String>,
     #[arg(long)]
     channel: Option<String>,
+    #[arg(long)]
+    wait: bool,
     #[arg(required = true, trailing_var_arg = true)]
     message: Vec<String>,
 }
@@ -221,6 +226,7 @@ async fn run(arg0_paths: Arg0DispatchPaths) -> Result<()> {
         CommandKind::Login(args) => login(args).await,
         CommandKind::Logout(args) => logout(args).await,
         CommandKind::Service(args) => service(args).await,
+        CommandKind::Whatsapp(args) => whatsapp::run(args).await,
         CommandKind::Channel(args) => channel(args).await,
         CommandKind::SessionCreate(args) => session_create(args).await,
         CommandKind::SessionSend(args) => session_send(args).await,
@@ -341,9 +347,14 @@ async fn session_send(args: SessionSendArgs) -> Result<()> {
     };
     let message = args.message.join(" ");
     let mut client = CodexRpcClient::connect(&args.endpoint).await?;
-    let response = client.turn_start(thread_id, message).await?;
-    serde_json::to_writer_pretty(std::io::stdout(), &response)?;
-    println!();
+    if args.wait {
+        let response = client.turn_start_collect(thread_id, message).await?;
+        println!("{response}");
+    } else {
+        let response = client.turn_start(thread_id, message).await?;
+        serde_json::to_writer_pretty(std::io::stdout(), &response)?;
+        println!();
+    }
     Ok(())
 }
 

@@ -79,6 +79,14 @@ impl CodexRpcClient {
     }
 
     pub async fn turn_start_streaming(&mut self, thread_id: String, text: String) -> Result<()> {
+        let response = self.turn_start_collect(thread_id, text).await?;
+        let mut stdout = std::io::stdout().lock();
+        stdout.write_all(response.as_bytes())?;
+        writeln!(stdout)?;
+        Ok(())
+    }
+
+    pub async fn turn_start_collect(&mut self, thread_id: String, text: String) -> Result<String> {
         let request_id = self.request_id();
         let request = ClientRequest::TurnStart {
             request_id: request_id.clone(),
@@ -100,7 +108,7 @@ impl CodexRpcClient {
 
         let mut saw_response = false;
         let mut saw_completion = false;
-        let mut stdout = std::io::stdout().lock();
+        let mut response = String::new();
         while let Some(message) = self.ws.next().await {
             let message = message.context("read websocket message")?;
             let Some(rpc_message) = decode_ws_message(message)? else {
@@ -128,8 +136,7 @@ impl CodexRpcClient {
                         ServerNotification::AgentMessageDelta(delta)
                             if delta.thread_id == thread_id =>
                         {
-                            stdout.write_all(delta.delta.as_bytes())?;
-                            stdout.flush()?;
+                            response.push_str(&delta.delta);
                         }
                         ServerNotification::TurnCompleted(done) if done.thread_id == thread_id => {
                             saw_completion = true;
@@ -145,8 +152,7 @@ impl CodexRpcClient {
         }
 
         if saw_response && saw_completion {
-            writeln!(stdout)?;
-            Ok(())
+            Ok(response)
         } else {
             anyhow::bail!("websocket closed before turn completed")
         }
