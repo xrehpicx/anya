@@ -58,6 +58,7 @@ enum CommandKind {
     /// Install and run the WhatsApp bridge channel.
     Whatsapp(whatsapp::WhatsappArgs),
     /// Create, list, and bind generalized chat channels to Codex threads.
+    #[command(alias = "channels")]
     Channel(ChannelArgs),
     /// Create a Codex thread through the running app server.
     SessionCreate(SessionCreateArgs),
@@ -159,8 +160,15 @@ struct ChannelArgs {
 #[derive(Debug, Subcommand)]
 enum ChannelCommand {
     List,
-    Bind { name: String, thread_id: String },
-    Resolve { name: String },
+    Bind {
+        name: String,
+        thread_id: String,
+    },
+    Resolve {
+        name: String,
+    },
+    /// Configure a WhatsApp-backed channel bridge.
+    Whatsapp(whatsapp::WhatsappArgs),
 }
 
 #[derive(Debug, Args)]
@@ -301,22 +309,25 @@ async fn service(args: ServiceArgs) -> Result<()> {
 }
 
 async fn channel(args: ChannelArgs) -> Result<()> {
-    let mut store = ChannelStore::load().await?;
     match args.command {
         ChannelCommand::List => {
+            let store = ChannelStore::load().await?;
             serde_json::to_writer_pretty(std::io::stdout(), store.channels())?;
             println!();
         }
         ChannelCommand::Bind { name, thread_id } => {
+            let mut store = ChannelStore::load().await?;
             store.bind(name, thread_id);
             store.save().await?;
         }
         ChannelCommand::Resolve { name } => {
+            let store = ChannelStore::load().await?;
             let thread_id = store
                 .resolve(&name)
                 .with_context(|| format!("unknown channel {name:?}"))?;
             println!("{thread_id}");
         }
+        ChannelCommand::Whatsapp(args) => whatsapp::run(args).await?,
     }
     Ok(())
 }

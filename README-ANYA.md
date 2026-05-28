@@ -84,25 +84,40 @@ WhatsApp chat or group to a persistent Anya channel named
 only responds when the message starts with `anya`, `/anya`, `/ask`, or mentions
 the bot account.
 
-Install bridge files and Node dependencies:
+Guided setup installs the bridge, installs Node dependencies, and starts pairing
+in the foreground:
 
 ```sh
-anya whatsapp install
+anya whatsapp setup
 ```
 
-Run it in the foreground and scan the QR code from WhatsApp:
+Use a dedicated WhatsApp number when possible. To pair with a phone-number code
+instead of a QR:
 
 ```sh
-anya whatsapp bridge
+anya whatsapp setup --phone-number +15551234567
 ```
 
-For a user systemd unit:
+You can also reach the same flow through the channel command namespace:
+
+```sh
+anya channels whatsapp setup
+```
+
+After pairing, stop the foreground bridge with Ctrl-C and install it as a user
+service:
 
 ```sh
 mkdir -p ~/.config/systemd/user
 anya whatsapp print-service --anya-binary ~/.local/bin/anya > ~/.config/systemd/user/anya-whatsapp.service
 systemctl --user daemon-reload
 systemctl --user enable --now anya-whatsapp.service
+```
+
+For non-interactive provisioning, install only the bridge files:
+
+```sh
+anya whatsapp setup --no-run
 ```
 
 To use it in a WhatsApp group, add the paired WhatsApp account to the group and

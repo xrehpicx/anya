@@ -16,6 +16,8 @@ pub struct WhatsappArgs {
 
 #[derive(Debug, Subcommand)]
 enum WhatsappCommand {
+    /// Install the bridge and start a guided WhatsApp pairing flow.
+    Setup(WhatsappSetupArgs),
     /// Install the Node/Baileys WhatsApp bridge files.
     Install(WhatsappInstallArgs),
     /// Run the WhatsApp bridge in the foreground.
@@ -33,6 +35,33 @@ struct WhatsappInstallArgs {
 }
 
 #[derive(Debug, Args)]
+struct WhatsappSetupArgs {
+    #[arg(long)]
+    dir: Option<PathBuf>,
+    #[arg(long, env = "ANYA_ENDPOINT", default_value = "ws://127.0.0.1:4827")]
+    endpoint: String,
+    #[arg(long, default_value = "whatsapp")]
+    channel_prefix: String,
+    #[arg(long, default_value = "anya")]
+    bot_name: String,
+    /// Request a WhatsApp "link with phone number" code instead of showing a QR.
+    #[arg(long, value_name = "E164")]
+    phone_number: Option<String>,
+    #[arg(long)]
+    anya_binary: Option<PathBuf>,
+    /// Write ~/.config/systemd/user/anya-whatsapp.service during setup.
+    #[arg(long)]
+    install_user_service: bool,
+    #[arg(long, default_value = "anya-whatsapp")]
+    service_name: String,
+    /// Install files and optional service unit without starting the bridge.
+    #[arg(long)]
+    no_run: bool,
+    #[arg(long)]
+    skip_npm_install: bool,
+}
+
+#[derive(Debug, Args)]
 struct WhatsappBridgeArgs {
     #[arg(long)]
     dir: Option<PathBuf>,
@@ -42,6 +71,9 @@ struct WhatsappBridgeArgs {
     channel_prefix: String,
     #[arg(long, default_value = "anya")]
     bot_name: String,
+    /// Request a WhatsApp "link with phone number" code instead of showing a QR.
+    #[arg(long, env = "ANYA_WHATSAPP_PAIR_PHONE", value_name = "E164")]
+    phone_number: Option<String>,
     #[arg(long)]
     anya_binary: Option<PathBuf>,
 }
@@ -50,14 +82,13 @@ struct WhatsappBridgeArgs {
 struct WhatsappServiceArgs {
     #[arg(long)]
     dir: Option<PathBuf>,
-    #[arg(long, default_value = "anya-whatsapp")]
-    name: String,
     #[arg(long)]
     anya_binary: Option<PathBuf>,
 }
 
 pub async fn run(args: WhatsappArgs) -> Result<()> {
     match args.command {
+        WhatsappCommand::Setup(args) => setup(args).await,
         WhatsappCommand::Install(args) => install(args).await,
         WhatsappCommand::Bridge(args) => bridge(args).await,
         WhatsappCommand::PrintService(args) => print_service(args),
@@ -66,14 +97,59 @@ pub async fn run(args: WhatsappArgs) -> Result<()> {
 
 async fn install(args: WhatsappInstallArgs) -> Result<()> {
     let dir = bridge_dir(args.dir)?;
+    install_bridge_files(&dir, args.skip_npm_install).await?;
+    println!("{}", dir.display());
+    Ok(())
+}
+
+async fn setup(args: WhatsappSetupArgs) -> Result<()> {
+    if args.install_user_service && !cfg!(target_os = "linux") {
+        anyhow::bail!("--install-user-service is only supported on Linux");
+    }
+    let dir = bridge_dir(args.dir)?;
+    install_bridge_files(&dir, args.skip_npm_install).await?;
+
+    let anya_binary = resolve_anya_binary(args.anya_binary);
+    if args.install_user_service {
+        install_user_service(&args.service_name, &anya_binary, &dir).await?;
+    }
+
+    println!("WhatsApp bridge installed in {}", dir.display());
+    if args.no_run {
+        if !args.install_user_service {
+            print_setup_next_steps(&dir);
+        }
+        return Ok(());
+    }
+
+    if args.phone_number.is_some() {
+        println!(
+            "Starting WhatsApp bridge. Use the pairing code printed below from WhatsApp > Linked devices > Link with phone number instead."
+        );
+    } else {
+        println!("Starting WhatsApp bridge. Scan the QR from WhatsApp > Linked devices.");
+    }
+
+    bridge(WhatsappBridgeArgs {
+        dir: Some(dir),
+        endpoint: args.endpoint,
+        channel_prefix: args.channel_prefix,
+        bot_name: args.bot_name,
+        phone_number: args.phone_number,
+        anya_binary: Some(anya_binary),
+    })
+    .await
+}
+
+async fn install_bridge_files(dir: &std::path::Path, skip_npm_install: bool) -> Result<()> {
     tokio::fs::create_dir_all(&dir).await?;
     write_file(dir.join("package.json"), PACKAGE_JSON).await?;
     write_file(dir.join("bridge.mjs"), BRIDGE_MJS).await?;
 
-    if !args.skip_npm_install {
+    if !skip_npm_install {
         let status = Command::new("npm")
             .arg("install")
-            .current_dir(&dir)
+            .current_dir(dir)
             .stdin(Stdio::null())
             .status()
             .await
@@ -82,35 +158,31 @@ async fn install(args: WhatsappInstallArgs) -> Result<()> {
             anyhow::bail!("npm install failed with {status}");
         }
     }
-
-    println!("{}", dir.display());
     Ok(())
 }
 
 async fn bridge(args: WhatsappBridgeArgs) -> Result<()> {
     let dir = bridge_dir(args.dir)?;
     if !dir.join("bridge.mjs").exists() {
-        install(WhatsappInstallArgs {
-            dir: Some(dir.clone()),
-            skip_npm_install: false,
-        })
-        .await?;
+        install_bridge_files(&dir, false).await?;
     }
 
-    let anya_binary = args
-        .anya_binary
-        .unwrap_or_else(|| std::env::current_exe().unwrap_or_else(|_| PathBuf::from("anya")));
-    let status = Command::new("node")
+    let anya_binary = resolve_anya_binary(args.anya_binary);
+    let phone_number = normalize_pair_phone_number(args.phone_number)?;
+    let mut command = Command::new("node");
+    command
         .arg(dir.join("bridge.mjs"))
         .env("ANYA_BINARY", anya_binary)
         .env("ANYA_ENDPOINT", args.endpoint)
         .env("ANYA_CHANNEL_PREFIX", args.channel_prefix)
         .env("ANYA_BOT_NAME", args.bot_name)
         .env("ANYA_WHATSAPP_SESSION_DIR", dir.join("session"))
-        .current_dir(&dir)
-        .status()
-        .await
-        .context("run WhatsApp bridge")?;
+        .current_dir(&dir);
+    if let Some(phone_number) = phone_number {
+        command.env("ANYA_WHATSAPP_PAIR_PHONE", phone_number);
+    }
+
+    let status = command.status().await.context("run WhatsApp bridge")?;
     if !status.success() {
         anyhow::bail!("WhatsApp bridge exited with {status}");
     }
@@ -119,11 +191,40 @@ async fn bridge(args: WhatsappBridgeArgs) -> Result<()> {
 
 fn print_service(args: WhatsappServiceArgs) -> Result<()> {
     let dir = bridge_dir(args.dir)?;
-    let binary = args
-        .anya_binary
-        .unwrap_or_else(|| std::env::current_exe().unwrap_or_else(|_| PathBuf::from("anya")));
+    let binary = resolve_anya_binary(args.anya_binary);
     println!("{}", whatsapp_systemd_unit(&binary, &dir).trim_end());
     Ok(())
+}
+
+async fn install_user_service(
+    service_name: &str,
+    binary: &std::path::Path,
+    dir: &std::path::Path,
+) -> Result<()> {
+    if !cfg!(target_os = "linux") {
+        anyhow::bail!("--install-user-service is only supported on Linux");
+    }
+    let config_dir = dirs::config_dir()
+        .context("resolve user config directory")?
+        .join("systemd")
+        .join("user");
+    tokio::fs::create_dir_all(&config_dir).await?;
+    let path = config_dir.join(format!("{service_name}.service"));
+    write_file(path.clone(), &whatsapp_systemd_unit(binary, dir)).await?;
+    println!("Installed user service: {}", path.display());
+    println!("Run: systemctl --user daemon-reload");
+    println!("Run: systemctl --user enable --now {service_name}.service");
+    Ok(())
+}
+
+fn print_setup_next_steps(dir: &std::path::Path) {
+    println!("Next steps:");
+    println!("  anya whatsapp bridge --dir {}", dir.display());
+    println!(
+        "  anya whatsapp print-service --anya-binary ~/.local/bin/anya > ~/.config/systemd/user/anya-whatsapp.service"
+    );
+    println!("  systemctl --user daemon-reload");
+    println!("  systemctl --user enable --now anya-whatsapp.service");
 }
 
 fn whatsapp_systemd_unit(binary: &std::path::Path, dir: &std::path::Path) -> String {
@@ -144,6 +245,21 @@ fn whatsapp_systemd_unit(binary: &std::path::Path, dir: &std::path::Path) -> Str
         binary.display(),
         dir.display()
     )
+}
+
+fn resolve_anya_binary(explicit: Option<PathBuf>) -> PathBuf {
+    explicit.unwrap_or_else(|| std::env::current_exe().unwrap_or_else(|_| PathBuf::from("anya")))
+}
+
+fn normalize_pair_phone_number(phone_number: Option<String>) -> Result<Option<String>> {
+    let Some(phone_number) = phone_number else {
+        return Ok(None);
+    };
+    let digits: String = phone_number.chars().filter(char::is_ascii_digit).collect();
+    if digits.len() < 8 {
+        anyhow::bail!("--phone-number must include a country code, e.g. +15551234567");
+    }
+    Ok(Some(digits))
 }
 
 async fn write_file(path: PathBuf, contents: &str) -> Result<()> {
@@ -189,6 +305,7 @@ const anyaBinary = process.env.ANYA_BINARY || 'anya';
 const endpoint = process.env.ANYA_ENDPOINT || 'ws://127.0.0.1:4827';
 const channelPrefix = process.env.ANYA_CHANNEL_PREFIX || 'whatsapp';
 const botName = (process.env.ANYA_BOT_NAME || 'anya').toLowerCase();
+const pairPhoneNumber = (process.env.ANYA_WHATSAPP_PAIR_PHONE || '').replace(/\D/g, '');
 const sessionDir =
   process.env.ANYA_WHATSAPP_SESSION_DIR ||
   join(process.env.HOME || '.', '.local', 'share', 'anya', 'whatsapp', 'session');
@@ -240,6 +357,10 @@ function isGroup(remoteJid) {
   return remoteJid.endsWith('@g.us');
 }
 
+function escapeRegex(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 function mentionedBot(message, sock) {
   const mentions =
     message?.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
@@ -247,16 +368,18 @@ function mentionedBot(message, sock) {
   return own ? mentions.some((jid) => jid.includes(own)) : false;
 }
 
-function stripInvocation(text) {
+function stripInvocation(text, message, sock) {
   const trimmed = text.trim();
+  const escapedBotName = escapeRegex(botName);
   const patterns = [
-    new RegExp(`^@?${botName}[,:\\s]+`, 'i'),
+    new RegExp(`^@?${escapedBotName}(?:[,:\\s]+|$)`, 'i'),
     /^\/anya(?:@\S+)?\s+/i,
     /^\/ask(?:@\S+)?\s+/i,
   ];
   for (const pattern of patterns) {
     if (pattern.test(trimmed)) return trimmed.replace(pattern, '').trim();
   }
+  if (mentionedBot(message, sock)) return trimmed.replace(/^@\S+\s*/, '').trim();
   return trimmed;
 }
 
@@ -283,7 +406,7 @@ async function handleMessage(sock, message) {
   const rawText = extractText(message);
   if (!shouldRespond(rawText, remoteJid, message, sock)) return;
 
-  const text = stripInvocation(rawText);
+  const text = stripInvocation(rawText, message, sock);
   if (!text) return;
 
   const channel = ensureChannel(remoteJid);
@@ -312,6 +435,21 @@ async function handleMessage(sock, message) {
   }
 }
 
+let pairingCodeRequested = false;
+
+async function requestPhonePairingCode(sock) {
+  if (!pairPhoneNumber || pairingCodeRequested) return;
+  pairingCodeRequested = true;
+  try {
+    const code = await sock.requestPairingCode(pairPhoneNumber);
+    console.log(`WhatsApp pairing code for +${pairPhoneNumber}: ${code}`);
+    console.log('Open WhatsApp on that phone, go to Linked devices, choose "Link with phone number instead", then enter the code.');
+  } catch (error) {
+    pairingCodeRequested = false;
+    console.error(`Failed to request WhatsApp pairing code: ${error.message}`);
+  }
+}
+
 async function start() {
   const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
   const { version } = await fetchLatestBaileysVersion();
@@ -322,11 +460,17 @@ async function start() {
     version,
   });
 
+  if (pairPhoneNumber && !state.creds.registered) {
+    setTimeout(() => void requestPhonePairingCode(sock), 2500);
+  }
+
   sock.ev.on('creds.update', saveCreds);
   sock.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
-    if (qr) {
+    if (qr && !pairPhoneNumber) {
       console.log('Scan this QR code with WhatsApp:');
       qrcode.generate(qr, { small: true });
+    } else if (qr && pairPhoneNumber) {
+      void requestPhonePairingCode(sock);
     }
     if (connection === 'open') {
       console.log('Anya WhatsApp bridge connected.');
@@ -354,6 +498,7 @@ start().catch((error) => {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pretty_assertions::assert_eq;
 
     #[test]
     fn whatsapp_user_service_targets_default_target() {
@@ -366,5 +511,18 @@ mod tests {
         assert!(unit.contains(
             "ExecStart=/home/raj/.local/bin/anya whatsapp bridge --dir /home/raj/.local/share/anya/whatsapp\n"
         ));
+    }
+
+    #[test]
+    fn normalizes_pair_phone_number_to_digits() {
+        assert_eq!(
+            Some("15551234567".to_string()),
+            normalize_pair_phone_number(Some("+1 (555) 123-4567".to_string())).unwrap()
+        );
+    }
+
+    #[test]
+    fn rejects_short_pair_phone_number() {
+        assert!(normalize_pair_phone_number(Some("+12".to_string())).is_err());
     }
 }
