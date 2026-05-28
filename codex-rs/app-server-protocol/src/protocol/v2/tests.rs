@@ -1756,6 +1756,7 @@ fn client_request_turn_start_granular_approval_policy_is_marked_experimental() {
             request_id: crate::RequestId::Integer(4),
             params: TurnStartParams {
                 thread_id: "thr_123".to_string(),
+                client_user_message_id: None,
                 input: Vec::new(),
                 approval_policy: Some(AskForApproval::Granular {
                     sandbox_approval: false,
@@ -2314,6 +2315,7 @@ fn network_requirements_serializes_canonical_and_legacy_fields() {
 fn core_turn_item_into_thread_item_converts_supported_variants() {
     let user_item = TurnItem::UserMessage(UserMessageItem {
         id: "user-1".to_string(),
+        client_id: Some("client-message-1".to_string()),
         content: vec![
             CoreUserInput::Text {
                 text: "hello".to_string(),
@@ -2342,6 +2344,7 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
         ThreadItem::from(user_item),
         ThreadItem::UserMessage {
             id: "user-1".to_string(),
+            client_id: Some("client-message-1".to_string()),
             content: vec![
                 UserInput::Text {
                     text: "hello".to_string(),
@@ -3582,6 +3585,7 @@ fn turn_start_params_preserve_explicit_null_service_tier() {
 
     let without_override = TurnStartParams {
         thread_id: "thread_123".to_string(),
+        client_user_message_id: None,
         input: vec![],
         responsesapi_client_metadata: None,
         additional_context: None,
