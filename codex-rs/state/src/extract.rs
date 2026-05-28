@@ -343,6 +343,7 @@ mod tests {
             &RolloutItem::TurnContext(TurnContextItem {
                 turn_id: Some("turn-1".to_string()),
                 cwd: PathBuf::from("/parent/workspace"),
+                workspace_roots: None,
                 current_date: None,
                 timezone: None,
                 approval_policy: AskForApproval::Never,
@@ -378,6 +379,7 @@ mod tests {
             &RolloutItem::TurnContext(TurnContextItem {
                 turn_id: Some("turn-1".to_string()),
                 cwd: PathBuf::from("/fallback/workspace"),
+                workspace_roots: None,
                 current_date: None,
                 timezone: None,
                 approval_policy: AskForApproval::OnRequest,
@@ -407,6 +409,7 @@ mod tests {
             &RolloutItem::TurnContext(TurnContextItem {
                 turn_id: Some("turn-1".to_string()),
                 cwd: PathBuf::from("/fallback/workspace"),
+                workspace_roots: None,
                 current_date: None,
                 timezone: None,
                 approval_policy: AskForApproval::OnRequest,
