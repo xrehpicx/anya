@@ -225,6 +225,17 @@ impl ExecExpiration {
         }
     }
 
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub(crate) fn cancellation_token(&self) -> Option<CancellationToken> {
+        match self {
+            ExecExpiration::Timeout(_) | ExecExpiration::DefaultTimeout => None,
+            ExecExpiration::Cancellation(cancellation)
+            | ExecExpiration::TimeoutOrCancellation { cancellation, .. } => {
+                Some(cancellation.clone())
+            }
+        }
+    }
+
     pub(crate) fn with_cancellation(self, cancellation: CancellationToken) -> Self {
         match self {
             ExecExpiration::Timeout(timeout) => ExecExpiration::TimeoutOrCancellation {
@@ -592,12 +603,16 @@ async fn exec_windows_sandbox(
         network.apply_to_env(&mut env);
     }
 
-    // TODO(iceweasel-oai): run_windows_sandbox_capture should support all
-    // variants of ExecExpiration, not just timeout.
-    let timeout_ms = if capture_policy.uses_expiration() {
-        expiration.timeout_ms()
+    // Windows sandbox capture still receives timeout and cancellation separately.
+    let (cancellation, timeout_ms) = if capture_policy.uses_expiration() {
+        let cancellation = expiration.cancellation_token().map(|token| {
+            codex_windows_sandbox::WindowsSandboxCancellationToken::new(move || {
+                token.is_cancelled()
+            })
+        });
+        (cancellation, expiration.timeout_ms())
     } else {
-        None
+        (None, None)
     };
 
     let sandbox_cwd = windows_sandbox_policy_cwd.clone();
@@ -634,6 +649,7 @@ async fn exec_windows_sandbox(
                     cwd: &cwd,
                     env_map: env,
                     timeout_ms,
+                    cancellation,
                     use_private_desktop: windows_sandbox_private_desktop,
                     proxy_enforced,
                     read_roots_override: elevated_read_roots_override.as_deref(),
@@ -653,6 +669,7 @@ async fn exec_windows_sandbox(
                 &cwd,
                 env,
                 timeout_ms,
+                cancellation,
                 &additional_deny_read_paths,
                 &additional_deny_write_paths,
                 windows_sandbox_private_desktop,
