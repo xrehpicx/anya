@@ -1068,11 +1068,7 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::MentionsV2,
         key: "mentions_v2",
-        stage: Stage::Experimental {
-            name: "Mentions v2",
-            menu_description: "Use a unified @ mention popup for files, folders, apps, plugins, and skills.",
-            announcement: "",
-        },
+        stage: Stage::UnderDevelopment,
         default_enabled: false,
     },
     FeatureSpec {
