@@ -433,7 +433,7 @@ mod windows_impl {
     #[allow(clippy::too_many_arguments)]
     pub fn run_windows_sandbox_capture(
         permission_profile: &PermissionProfile,
-        permission_profile_cwd: &Path,
+        workspace_roots: &[AbsolutePathBuf],
         codex_home: &Path,
         command: Vec<String>,
         cwd: &Path,
@@ -444,7 +444,7 @@ mod windows_impl {
     ) -> Result<CaptureResult> {
         run_windows_sandbox_capture_with_filesystem_overrides(
             permission_profile,
-            permission_profile_cwd,
+            workspace_roots,
             codex_home,
             command,
             cwd,
@@ -460,7 +460,7 @@ mod windows_impl {
     #[allow(clippy::too_many_arguments)]
     pub fn run_windows_sandbox_capture_with_filesystem_overrides(
         permission_profile: &PermissionProfile,
-        permission_profile_cwd: &Path,
+        workspace_roots: &[AbsolutePathBuf],
         codex_home: &Path,
         command: Vec<String>,
         cwd: &Path,
@@ -481,7 +481,7 @@ mod windows_impl {
             .collect::<Vec<_>>();
         let common = prepare_legacy_spawn_context(
             permission_profile,
-            permission_profile_cwd,
+            workspace_roots,
             codex_home,
             cwd,
             &mut env_map,
@@ -660,14 +660,14 @@ mod windows_impl {
 
     pub fn run_windows_sandbox_legacy_preflight(
         permission_profile: &PermissionProfile,
-        permission_profile_cwd: &Path,
+        workspace_roots: &[AbsolutePathBuf],
         codex_home: &Path,
         cwd: &Path,
         env_map: &HashMap<String, String>,
     ) -> Result<()> {
-        let Ok(permissions) = super::resolved_permissions::ResolvedWindowsSandboxPermissions::try_from_permission_profile_for_cwd(
+        let Ok(permissions) = super::resolved_permissions::ResolvedWindowsSandboxPermissions::try_from_permission_profile_for_workspace_roots(
             permission_profile,
-            permission_profile_cwd,
+            workspace_roots,
         ) else {
             return Ok(());
         };
@@ -715,9 +715,9 @@ mod windows_impl {
         }
 
         fn should_apply_network_block(permission_profile: &PermissionProfile) -> bool {
-            ResolvedWindowsSandboxPermissions::try_from_permission_profile_for_cwd(
+            ResolvedWindowsSandboxPermissions::try_from_permission_profile_for_workspace_roots(
                 permission_profile,
-                Path::new("."),
+                &[],
             )
             .expect("managed permissions")
             .should_apply_network_block()
@@ -752,7 +752,7 @@ mod windows_impl {
             ] {
                 super::run_windows_sandbox_legacy_preflight(
                     &permission_profile,
-                    Path::new("."),
+                    &[],
                     Path::new("."),
                     Path::new("."),
                     &HashMap::new(),
@@ -769,6 +769,7 @@ mod stub {
     use anyhow::Result;
     use anyhow::bail;
     use codex_protocol::models::PermissionProfile;
+    use codex_utils_absolute_path::AbsolutePathBuf;
     use std::collections::HashMap;
     use std::path::Path;
 
@@ -783,7 +784,7 @@ mod stub {
     #[allow(clippy::too_many_arguments)]
     pub fn run_windows_sandbox_capture(
         _permission_profile: &PermissionProfile,
-        _permission_profile_cwd: &Path,
+        _workspace_roots: &[AbsolutePathBuf],
         _codex_home: &Path,
         _command: Vec<String>,
         _cwd: &Path,
@@ -797,7 +798,7 @@ mod stub {
 
     pub fn run_windows_sandbox_legacy_preflight(
         _permission_profile: &PermissionProfile,
-        _permission_profile_cwd: &Path,
+        _workspace_roots: &[AbsolutePathBuf],
         _codex_home: &Path,
         _cwd: &Path,
         _env_map: &HashMap<String, String>,
