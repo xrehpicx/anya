@@ -110,6 +110,11 @@ async fn install(args: WhatsappInstallArgs) -> Result<()> {
 }
 
 async fn setup(args: WhatsappSetupArgs) -> Result<()> {
+    if !args.foreground && !cfg!(target_os = "linux") {
+        anyhow::bail!(
+            "gateway service setup requires Linux systemd; pass --foreground to run the bridge directly"
+        );
+    }
     let dir = bridge_dir(args.dir)?;
     install_bridge_files(&dir, args.skip_npm_install).await?;
 
@@ -124,10 +129,10 @@ async fn setup(args: WhatsappSetupArgs) -> Result<()> {
     println!("WhatsApp bridge installed in {}", dir.display());
     if config.phone_number.is_some() {
         println!(
-            "Starting WhatsApp bridge. Use the pairing code printed below from WhatsApp > Linked devices > Link with phone number instead."
+            "Use the pairing code printed below from WhatsApp > Linked devices > Link with phone number instead."
         );
     } else {
-        println!("Starting WhatsApp bridge. Scan the QR from WhatsApp > Linked devices.");
+        println!("If a QR code is shown, scan it from WhatsApp > Linked devices.");
     }
 
     if !args.foreground {
