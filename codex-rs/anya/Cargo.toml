@@ -28,7 +28,7 @@ futures = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 supports-color = { workspace = true }
-tokio = { workspace = true, features = ["macros", "process", "rt-multi-thread", "fs", "io-util"] }
+tokio = { workspace = true, features = ["macros", "process", "rt-multi-thread", "fs", "io-util", "time"] }
 tokio-tungstenite = { workspace = true }
 
 [dev-dependencies]

@@ -6,6 +6,7 @@ mod whatsapp;
 use std::io::BufRead;
 use std::io::Write;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::Result;
@@ -53,6 +54,8 @@ enum CommandKind {
     Serve(ServeArgs),
     /// Manage login for the embedded Codex agent.
     Login(LoginArgs),
+    /// Check whether the embedded Codex agent can authenticate successfully.
+    Auth(AuthArgs),
     /// Remove stored authentication credentials for the embedded Codex agent.
     Logout(LogoutArgs),
     /// Install or print a systemd unit for Anya.
@@ -119,6 +122,28 @@ struct LoginArgs {
 enum LoginSubcommand {
     /// Show login status.
     Status,
+}
+
+#[derive(Debug, Args)]
+struct AuthArgs {
+    #[command(subcommand)]
+    command: AuthCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum AuthCommand {
+    /// Probe the running Anya gateway with a tiny Codex turn.
+    Status(AuthStatusArgs),
+}
+
+#[derive(Debug, Args)]
+struct AuthStatusArgs {
+    #[arg(long, env = "ANYA_ENDPOINT", default_value = "ws://127.0.0.1:4827")]
+    endpoint: String,
+    #[arg(long, default_value = "auth-status")]
+    channel: String,
+    #[arg(long, default_value_t = 45)]
+    timeout_secs: u64,
 }
 
 #[derive(Debug, Args)]
@@ -247,6 +272,7 @@ async fn run(arg0_paths: Arg0DispatchPaths) -> Result<()> {
     match Cli::parse().command {
         CommandKind::Serve(args) => serve(args, arg0_paths).await,
         CommandKind::Login(args) => login(args).await,
+        CommandKind::Auth(args) => auth(args).await,
         CommandKind::Logout(args) => logout(args).await,
         CommandKind::Service(args) => service(args).await,
         CommandKind::Whatsapp(args) => whatsapp::run(args).await,
@@ -291,6 +317,83 @@ async fn login(args: LoginArgs) -> Result<()> {
 
 async fn logout(args: LogoutArgs) -> Result<()> {
     run_logout(args.config_overrides).await;
+}
+
+async fn auth(args: AuthArgs) -> Result<()> {
+    match args.command {
+        AuthCommand::Status(args) => auth_status(args).await,
+    }
+}
+
+async fn auth_status(args: AuthStatusArgs) -> Result<()> {
+    let timeout_secs = args.timeout_secs.max(1);
+    let timeout_duration = Duration::from_secs(timeout_secs);
+    let mut client = CodexRpcClient::connect(&args.endpoint).await?;
+    println!("Gateway: connected ({})", args.endpoint);
+
+    let thread_id = match ChannelStore::load().await?.resolve(&args.channel) {
+        Some(thread_id) => thread_id.to_string(),
+        None => create_default_channel_thread(&mut client, &args.channel).await?,
+    };
+    println!("Probe channel: {}", args.channel);
+
+    let probe = "Reply exactly: auth-ok".to_string();
+    let result = tokio::time::timeout(
+        timeout_duration,
+        client.turn_start_collect(thread_id, probe.clone()),
+    )
+    .await;
+    if let Ok(Err(error)) = &result
+        && is_thread_not_found_error(error)
+    {
+        let thread_id = create_default_channel_thread(&mut client, &args.channel).await?;
+        let retry = tokio::time::timeout(
+            timeout_duration,
+            client.turn_start_collect(thread_id, probe),
+        )
+        .await;
+        return handle_auth_probe_result(retry, timeout_secs);
+    }
+    handle_auth_probe_result(result, timeout_secs)
+}
+
+fn handle_auth_probe_result(
+    result: std::result::Result<Result<String>, tokio::time::error::Elapsed>,
+    timeout_secs: u64,
+) -> Result<()> {
+    match result {
+        Ok(Ok(reply)) if reply.to_ascii_lowercase().contains("auth-ok") => {
+            println!("Auth probe: ok");
+            Ok(())
+        }
+        Ok(Ok(reply)) => {
+            println!("Auth probe: completed");
+            println!("Unexpected reply: {}", reply.trim());
+            Ok(())
+        }
+        Ok(Err(error)) => {
+            print_auth_failure_hint(&error);
+            Err(error).context("auth probe failed")
+        }
+        Err(_) => {
+            anyhow::bail!(
+                "auth probe timed out after {timeout_secs}s. Stored credentials may be stale or the provider may be unavailable. Run `anya login --device-auth`, then restart the anya service."
+            );
+        }
+    }
+}
+
+fn print_auth_failure_hint(error: &anyhow::Error) {
+    let message = error.to_string();
+    if message.contains("token_invalidated")
+        || message.contains("refresh_token")
+        || message.contains("401 Unauthorized")
+        || message.contains("Unauthorized")
+    {
+        eprintln!(
+            "Auth probe: failed because Codex credentials are stale. Run `anya login --device-auth`, then restart the anya service."
+        );
+    }
 }
 
 async fn serve(args: ServeArgs, arg0_paths: Arg0DispatchPaths) -> Result<()> {
@@ -674,5 +777,20 @@ mod tests {
             parse_channel_slash_command("/stop@anya")
         );
         assert_eq!(None, parse_channel_slash_command("/model gpt-5.5"));
+    }
+
+    #[test]
+    fn parses_auth_status_command() {
+        let cli = Cli::try_parse_from(["anya", "auth", "status"]).unwrap();
+        match cli.command {
+            CommandKind::Auth(AuthArgs {
+                command: AuthCommand::Status(args),
+            }) => {
+                assert_eq!("ws://127.0.0.1:4827", args.endpoint);
+                assert_eq!("auth-status", args.channel);
+                assert_eq!(45, args.timeout_secs);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 }

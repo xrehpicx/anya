@@ -630,7 +630,7 @@ function parseSlashCommand(text) {
 }
 
 function isChannelSlashCommand(command) {
-  return ['new', 'reset', 'stop', 'status', 'help'].includes(command?.name);
+  return ['new', 'reset', 'stop', 'status', 'help', 'reply'].includes(command?.name);
 }
 
 function stopActiveRun(channel) {
@@ -651,7 +651,7 @@ function formatAnyaError(error) {
     return 'Anya needs a fresh Codex login on this server. Run: anya login --device-auth';
   }
   if (message.includes('timed out')) {
-    return 'Anya timed out waiting for a reply. Try /stop, then send the message again.';
+    return 'Anya timed out waiting for Codex. Run: anya auth status';
   }
   if (message.includes('failed to load configuration') || message.includes('Model provider')) {
     return `Anya configuration error: ${message}`;
@@ -668,8 +668,9 @@ function isThreadNotFoundError(error) {
   return message.includes('thread not found');
 }
 
-async function replyText(sock, remoteJid, message, text) {
-  await sock.sendMessage(remoteJid, { text }, { quoted: message });
+async function replyText(sock, remoteJid, message, text, options = {}) {
+  const sendOptions = options.quoted ? { quoted: message } : undefined;
+  await sock.sendMessage(remoteJid, { text }, sendOptions);
 }
 
 function sendPrompt(channel, text) {
@@ -731,12 +732,35 @@ async function handleSlashCommand(sock, remoteJid, message, command) {
         `Anya is connected. Channel: ${channel}. Active reply: ${activeRuns.has(channel) ? 'yes' : 'no'}.`
       );
       return true;
+    case 'reply':
+      if (!command.rest) {
+        await replyText(sock, remoteJid, message, 'Usage: /reply <message>');
+        return true;
+      }
+      await ensureChannel(remoteJid);
+      if (activeRuns.has(channel)) {
+        await replyText(
+          sock,
+          remoteJid,
+          message,
+          'Anya is already replying in this channel. Send /stop to cancel it first.'
+        );
+        return true;
+      }
+      await sock.sendPresenceUpdate('composing', remoteJid);
+      try {
+        const reply = (await sendPromptWithRecovery(remoteJid, channel, command.rest)).trim();
+        if (reply) await replyText(sock, remoteJid, message, reply, { quoted: true });
+      } finally {
+        await sock.sendPresenceUpdate('paused', remoteJid);
+      }
+      return true;
     case 'help':
       await replyText(
         sock,
         remoteJid,
         message,
-        'Anya commands: /new, /reset, /stop, /status, /help. In groups, mention anya or start with /anya or /ask to chat.'
+        'Anya commands: /new, /reset, /stop, /status, /reply, /help. In groups, mention anya or start with /anya or /ask to chat.'
       );
       return true;
   }
@@ -750,10 +774,19 @@ async function handleMessage(sock, message) {
 
   const rawText = extractText(message);
   const command = parseSlashCommand(rawText);
+  console.log(JSON.stringify({
+    event: 'whatsapp_message',
+    remoteJid,
+    fromMe: message.key.fromMe,
+    isGroup: isGroup(remoteJid),
+    command: command?.name || null,
+    textLength: rawText.length,
+  }));
   if (isChannelSlashCommand(command)) {
     try {
       await handleSlashCommand(sock, remoteJid, message, command);
     } catch (error) {
+      console.error(`Anya WhatsApp command error: ${error?.stack || error?.message || error}`);
       await replyText(sock, remoteJid, message, formatAnyaError(error));
     }
     return;
@@ -783,6 +816,7 @@ async function handleMessage(sock, message) {
     }
   } catch (error) {
     if (!isStoppedError(error)) {
+      console.error(`Anya WhatsApp message error: ${error?.stack || error?.message || error}`);
       await replyText(sock, remoteJid, message, formatAnyaError(error));
     }
   } finally {
@@ -889,9 +923,10 @@ mod tests {
     #[test]
     fn whatsapp_bridge_handles_channel_slash_commands() {
         assert!(BRIDGE_MJS.contains("parseSlashCommand"));
-        assert!(BRIDGE_MJS.contains("['new', 'reset', 'stop', 'status', 'help']"));
+        assert!(BRIDGE_MJS.contains("['new', 'reset', 'stop', 'status', 'help', 'reply']"));
         assert!(BRIDGE_MJS.contains("Started a new Anya session for this channel."));
         assert!(BRIDGE_MJS.contains("Stopped the active Anya reply for this channel."));
         assert!(BRIDGE_MJS.contains("sendPromptWithRecovery"));
+        assert!(BRIDGE_MJS.contains("{ quoted: true }"));
     }
 }
