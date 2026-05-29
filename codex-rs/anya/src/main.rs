@@ -1,5 +1,6 @@
 mod channel;
 mod codex_rpc;
+mod home;
 mod service;
 mod whatsapp;
 
@@ -28,7 +29,9 @@ use codex_protocol::protocol::SessionSource;
 use codex_tui::AppExitInfo;
 use codex_tui::Cli as CodexTuiCli;
 use codex_tui::ExitReason;
+use codex_utils_cli::ApprovalModeCliArg;
 use codex_utils_cli::CliConfigOverrides;
+use codex_utils_cli::SandboxModeCliArg;
 use codex_utils_cli::resume_hint;
 use supports_color::Stream;
 
@@ -263,6 +266,7 @@ enum ChannelSlashCommand {
 }
 
 fn main() -> Result<()> {
+    home::ensure_anya_home()?;
     arg0_dispatch_or_else(|arg0_paths| async move { run(arg0_paths).await })
 }
 
@@ -385,7 +389,7 @@ async fn serve(args: ServeArgs, arg0_paths: Arg0DispatchPaths) -> Result<()> {
     };
     codex_app_server::run_main_with_transport_options(
         arg0_paths,
-        CliConfigOverrides::default(),
+        anya_full_access_config_overrides(),
         LoaderOverrides::default(),
         /*strict_config*/ false,
         /*default_analytics_enabled*/ false,
@@ -557,6 +561,15 @@ async fn create_default_channel_thread(
     Ok(response.thread.id)
 }
 
+fn anya_full_access_config_overrides() -> CliConfigOverrides {
+    CliConfigOverrides {
+        raw_overrides: vec![
+            "approval_policy=\"never\"".to_string(),
+            "sandbox_mode=\"danger-full-access\"".to_string(),
+        ],
+    }
+}
+
 fn is_thread_not_found_error(error: &anyhow::Error) -> bool {
     error.to_string().contains("thread not found")
 }
@@ -675,6 +688,10 @@ async fn chat(args: ChatArgs) -> Result<()> {
 
 async fn tui(args: TuiArgs, arg0_paths: Arg0DispatchPaths) -> Result<()> {
     let mut tui_cli = CodexTuiCli::parse_from(["anya-tui"]);
+    tui_cli.dangerously_bypass_approvals_and_sandbox = true;
+    tui_cli.approval_policy = Some(ApprovalModeCliArg::Never);
+    tui_cli.sandbox_mode = Some(SandboxModeCliArg::DangerFullAccess);
+    tui_cli.config_overrides = anya_full_access_config_overrides();
     if let Some(thread_id) = ChannelStore::load().await?.resolve(&args.channel) {
         tui_cli.resume_session_id = Some(thread_id.to_string());
     }
@@ -784,5 +801,18 @@ mod tests {
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn anya_full_access_config_overrides_force_unsandboxed_execution() {
+        let overrides = anya_full_access_config_overrides()
+            .parse_overrides()
+            .expect("parse full access overrides");
+
+        assert_eq!(2, overrides.len());
+        assert_eq!("approval_policy", overrides[0].0);
+        assert_eq!(Some("never"), overrides[0].1.as_str());
+        assert_eq!("sandbox_mode", overrides[1].0);
+        assert_eq!(Some("danger-full-access"), overrides[1].1.as_str());
     }
 }

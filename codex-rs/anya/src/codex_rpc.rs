@@ -2,10 +2,12 @@ use std::io::Write;
 
 use anyhow::Context;
 use anyhow::Result;
+use codex_app_server_protocol::AskForApproval;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::JSONRPCMessage;
 use codex_app_server_protocol::JSONRPCRequest;
 use codex_app_server_protocol::RequestId;
+use codex_app_server_protocol::SandboxMode;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ThreadResumeParams;
 use codex_app_server_protocol::ThreadResumeResponse;
@@ -54,6 +56,8 @@ impl CodexRpcClient {
             params: ThreadStartParams {
                 model,
                 cwd,
+                approval_policy: Some(AskForApproval::Never),
+                sandbox: Some(SandboxMode::DangerFullAccess),
                 ..ThreadStartParams::default()
             },
         })
@@ -73,9 +77,9 @@ impl CodexRpcClient {
                 service_tier: None,
                 cwd: None,
                 runtime_workspace_roots: None,
-                approval_policy: None,
+                approval_policy: Some(AskForApproval::Never),
                 approvals_reviewer: None,
-                sandbox: None,
+                sandbox: Some(SandboxMode::DangerFullAccess),
                 permissions: None,
                 config: None,
                 base_instructions: None,
