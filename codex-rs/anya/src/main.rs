@@ -467,7 +467,7 @@ async fn session_send(args: SessionSendArgs) -> Result<()> {
     let mut client = CodexRpcClient::connect(&args.endpoint).await?;
     match client.thread_resume(thread_id.clone()).await {
         Ok(_) => {}
-        Err(error) if channel.is_some() && is_thread_not_found_error(&error) => {
+        Err(error) if channel.is_some() && is_thread_unavailable_error(&error) => {
             let channel = channel
                 .as_deref()
                 .context("channel is required for stale thread recovery")?;
@@ -559,6 +559,11 @@ async fn create_default_channel_thread(
 
 fn is_thread_not_found_error(error: &anyhow::Error) -> bool {
     error.to_string().contains("thread not found")
+}
+
+fn is_thread_unavailable_error(error: &anyhow::Error) -> bool {
+    let message = error.to_string();
+    message.contains("thread not found") || message.contains("no rollout found")
 }
 
 fn parse_channel_slash_command(message: &str) -> Option<ChannelSlashCommand> {
