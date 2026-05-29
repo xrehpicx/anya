@@ -30,7 +30,7 @@ use crate::tools::parallel::ToolCallRuntime;
 use crate::tools::router::ToolCall;
 use crate::tools::router::ToolCallSource;
 use crate::unified_exec::resolve_max_tokens;
-use codex_features::Feature;
+use codex_protocol::openai_models::ToolMode;
 use codex_tools::ToolName;
 use codex_utils_output_truncation::TruncationPolicy;
 use codex_utils_output_truncation::formatted_truncate_text_content_items_with_policy;
@@ -91,7 +91,7 @@ impl CodeModeService {
         router: Arc<ToolRouter>,
         tracker: SharedTurnDiffTracker,
     ) -> Option<codex_code_mode::CodeModeTurnWorker> {
-        if !turn.features.enabled(Feature::CodeMode) {
+        if !matches!(turn.tool_mode, ToolMode::CodeMode | ToolMode::CodeModeOnly) {
             return None;
         }
 
