@@ -140,8 +140,6 @@ enum AuthCommand {
 struct AuthStatusArgs {
     #[arg(long, env = "ANYA_ENDPOINT", default_value = "ws://127.0.0.1:4827")]
     endpoint: String,
-    #[arg(long, default_value = "auth-status")]
-    channel: String,
     #[arg(long, default_value_t = 45)]
     timeout_secs: u64,
 }
@@ -331,36 +329,15 @@ async fn auth_status(args: AuthStatusArgs) -> Result<()> {
     let mut client = CodexRpcClient::connect(&args.endpoint).await?;
     println!("Gateway: connected ({})", args.endpoint);
 
-    let thread_id = match ChannelStore::load().await?.resolve(&args.channel) {
-        Some(thread_id) => thread_id.to_string(),
-        None => create_default_channel_thread(&mut client, &args.channel).await?,
-    };
-    println!("Probe channel: {}", args.channel);
-
+    let response = client.thread_start(/*model*/ None, /*cwd*/ None).await?;
+    let thread_id = response.thread.id;
+    println!("Probe thread: {thread_id}");
     let probe = "Reply exactly: auth-ok".to_string();
     let result = tokio::time::timeout(
         timeout_duration,
-        client.turn_start_collect(thread_id, probe.clone()),
+        client.turn_start_collect(thread_id, probe),
     )
     .await;
-    if let Ok(Err(error)) = &result
-        && is_thread_not_found_error(error)
-    {
-        let thread_id = create_default_channel_thread(&mut client, &args.channel).await?;
-        let retry = tokio::time::timeout(
-            timeout_duration,
-            client.turn_start_collect(thread_id, probe),
-        )
-        .await;
-        return handle_auth_probe_result(retry, timeout_secs);
-    }
-    handle_auth_probe_result(result, timeout_secs)
-}
-
-fn handle_auth_probe_result(
-    result: std::result::Result<Result<String>, tokio::time::error::Elapsed>,
-    timeout_secs: u64,
-) -> Result<()> {
     match result {
         Ok(Ok(reply)) if reply.to_ascii_lowercase().contains("auth-ok") => {
             println!("Auth probe: ok");
@@ -787,7 +764,6 @@ mod tests {
                 command: AuthCommand::Status(args),
             }) => {
                 assert_eq!("ws://127.0.0.1:4827", args.endpoint);
-                assert_eq!("auth-status", args.channel);
                 assert_eq!(45, args.timeout_secs);
             }
             other => panic!("unexpected command: {other:?}"),
