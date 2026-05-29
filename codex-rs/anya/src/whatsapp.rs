@@ -489,6 +489,10 @@ async function start() {
   });
 }
 
+// Baileys can unref its socket timers after setup returns; keep this bridge
+// process alive so it can continue receiving messages.
+setInterval(() => {}, 60_000);
+
 start().catch((error) => {
   console.error(error);
   process.exit(1);
