@@ -2305,7 +2305,7 @@ dependencies = [
  "tracing-subscriber",
  "unicode-segmentation",
  "which 8.0.0",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2488,7 +2488,7 @@ dependencies = [
  "tracing",
  "wildmatch",
  "winapi-util",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3922,7 +3922,7 @@ dependencies = [
  "vt100",
  "webbrowser",
  "which 8.0.0",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
  "winsplit",
  "wiremock",
 ]
