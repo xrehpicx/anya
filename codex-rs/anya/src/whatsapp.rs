@@ -455,7 +455,7 @@ async function start() {
   const { version } = await fetchLatestBaileysVersion();
   const sock = makeWASocket({
     auth: state,
-    logger: Pino({ level: process.env.ANYA_WHATSAPP_LOG_LEVEL || 'warn' }),
+    logger: Pino({ level: process.env.ANYA_WHATSAPP_LOG_LEVEL || 'fatal' }),
     printQRInTerminal: false,
     version,
   });
