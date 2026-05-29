@@ -419,7 +419,7 @@ const BRIDGE_MJS: &str = r#"import makeWASocket, {
 } from '@whiskeysockets/baileys';
 import Pino from 'pino';
 import qrcode from 'qrcode-terminal';
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -428,37 +428,137 @@ const endpoint = process.env.ANYA_ENDPOINT || 'ws://127.0.0.1:4827';
 const channelPrefix = process.env.ANYA_CHANNEL_PREFIX || 'whatsapp';
 const botName = (process.env.ANYA_BOT_NAME || 'anya').toLowerCase();
 const pairPhoneNumber = (process.env.ANYA_WHATSAPP_PAIR_PHONE || '').replace(/\D/g, '');
+const commandTimeoutMs = parseTimeout(
+  process.env.ANYA_WHATSAPP_COMMAND_TIMEOUT_MS,
+  30_000
+);
+const replyTimeoutMs = parseTimeout(
+  process.env.ANYA_WHATSAPP_REPLY_TIMEOUT_MS,
+  120_000
+);
 const sessionDir =
   process.env.ANYA_WHATSAPP_SESSION_DIR ||
   join(process.env.HOME || '.', '.local', 'share', 'anya', 'whatsapp', 'session');
+const activeRuns = new Map();
 
 mkdirSync(sessionDir, { recursive: true });
 
-function runAnya(args) {
-  const result = spawnSync(anyaBinary, args, {
-    encoding: 'utf8',
-    maxBuffer: 10 * 1024 * 1024,
-  });
-  if (result.error) throw result.error;
-  if (result.status !== 0) {
-    const stderr = (result.stderr || '').trim();
-    const stdout = (result.stdout || '').trim();
-    throw new Error(stderr || stdout || `anya exited with ${result.status}`);
+class AnyaRunStoppedError extends Error {
+  constructor() {
+    super('Stopped by /stop');
+    this.name = 'AnyaRunStoppedError';
   }
-  return result.stdout || '';
+}
+
+function parseTimeout(value, fallback) {
+  const parsed = Number.parseInt(value || '', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function runAnya(args, options = {}) {
+  const timeoutMs = options.timeoutMs || commandTimeoutMs;
+  const activeKey = options.activeKey;
+  return new Promise((resolve, reject) => {
+    const child = spawn(anyaBinary, args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    let sentSignal = false;
+    let killTimer;
+
+    const cleanup = () => {
+      clearTimeout(timeout);
+      clearTimeout(killTimer);
+      if (activeKey && activeRuns.get(activeKey)?.child === child) {
+        activeRuns.delete(activeKey);
+      }
+    };
+    const stopChild = () => {
+      if (child.exitCode !== null || sentSignal) return;
+      child.kill('SIGTERM');
+      sentSignal = true;
+      killTimer = setTimeout(() => {
+        if (child.exitCode === null) child.kill('SIGKILL');
+      }, 2_000);
+      killTimer.unref?.();
+    };
+    const settle = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      fn(value);
+    };
+    const fail = (error) => settle(reject, error);
+
+    const timeout = setTimeout(() => {
+      stopChild();
+      fail(new Error(`Anya command timed out after ${Math.round(timeoutMs / 1000)}s`));
+    }, timeoutMs);
+    timeout.unref?.();
+
+    if (activeKey) {
+      activeRuns.set(activeKey, {
+        child,
+        stop: () => {
+          stopChild();
+          fail(new AnyaRunStoppedError());
+        },
+      });
+    }
+
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk;
+      if (stdout.length > 10 * 1024 * 1024) {
+        stopChild();
+        fail(new Error('Anya stdout exceeded 10 MiB'));
+      }
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+      if (stderr.length > 10 * 1024 * 1024) {
+        stopChild();
+        fail(new Error('Anya stderr exceeded 10 MiB'));
+      }
+    });
+    child.on('error', fail);
+    child.on('close', (code, signal) => {
+      if (settled) return;
+      if (code === 0) {
+        settle(resolve, stdout);
+        return;
+      }
+      const detail = stderr.trim() || stdout.trim() || `anya exited with ${code ?? signal}`;
+      fail(new Error(detail));
+    });
+  });
 }
 
 function channelName(remoteJid) {
   return `${channelPrefix}:${remoteJid}`;
 }
 
-function ensureChannel(remoteJid) {
+async function createChannelSession(remoteJid) {
   const channel = channelName(remoteJid);
-  const resolve = spawnSync(anyaBinary, ['channel', 'resolve', channel], {
-    encoding: 'utf8',
+  await runAnya(['session-create', '--endpoint', endpoint, '--channel', channel], {
+    timeoutMs: commandTimeoutMs,
   });
-  if (resolve.status === 0 && resolve.stdout.trim()) return channel;
-  runAnya(['session-create', '--endpoint', endpoint, '--channel', channel]);
+  return channel;
+}
+
+async function ensureChannel(remoteJid) {
+  const channel = channelName(remoteJid);
+  try {
+    const resolved = await runAnya(['channel', 'resolve', channel], {
+      timeoutMs: commandTimeoutMs,
+    });
+    if (resolved.trim()) return channel;
+  } catch {
+  }
+  await createChannelSession(remoteJid);
   return channel;
 }
 
@@ -520,38 +620,171 @@ function shouldRespond(text, remoteJid, message, sock) {
   );
 }
 
+function parseSlashCommand(text) {
+  const match = text.trim().match(/^\/([a-zA-Z0-9_-]+)(?:@\S+)?(?:\s+([\s\S]*))?$/);
+  if (!match) return null;
+  return {
+    name: match[1].toLowerCase(),
+    rest: (match[2] || '').trim(),
+  };
+}
+
+function isChannelSlashCommand(command) {
+  return ['new', 'reset', 'stop', 'status', 'help'].includes(command?.name);
+}
+
+function stopActiveRun(channel) {
+  const active = activeRuns.get(channel);
+  if (!active) return false;
+  active.stop();
+  return true;
+}
+
+function formatAnyaError(error) {
+  const message = error?.message || String(error);
+  if (
+    message.includes('token_invalidated') ||
+    message.includes('refresh_token') ||
+    message.includes('401 Unauthorized') ||
+    message.includes('Unauthorized')
+  ) {
+    return 'Anya needs a fresh Codex login on this server. Run: anya login --device-auth';
+  }
+  if (message.includes('timed out')) {
+    return 'Anya timed out waiting for a reply. Try /stop, then send the message again.';
+  }
+  if (message.includes('failed to load configuration') || message.includes('Model provider')) {
+    return `Anya configuration error: ${message}`;
+  }
+  return `Anya error: ${message}`;
+}
+
+function isStoppedError(error) {
+  return error?.name === 'AnyaRunStoppedError';
+}
+
+function isThreadNotFoundError(error) {
+  const message = error?.message || String(error);
+  return message.includes('thread not found');
+}
+
+async function replyText(sock, remoteJid, message, text) {
+  await sock.sendMessage(remoteJid, { text }, { quoted: message });
+}
+
+function sendPrompt(channel, text) {
+  return runAnya([
+    'session-send',
+    '--endpoint',
+    endpoint,
+    '--channel',
+    channel,
+    '--wait',
+    text,
+  ], {
+    activeKey: channel,
+    timeoutMs: replyTimeoutMs,
+  });
+}
+
+async function sendPromptWithRecovery(remoteJid, channel, text) {
+  try {
+    return await sendPrompt(channel, text);
+  } catch (error) {
+    if (!isThreadNotFoundError(error)) throw error;
+    await createChannelSession(remoteJid);
+    return await sendPrompt(channel, text);
+  }
+}
+
+async function handleSlashCommand(sock, remoteJid, message, command) {
+  const channel = channelName(remoteJid);
+  switch (command.name) {
+    case 'new':
+    case 'reset':
+      stopActiveRun(channel);
+      await createChannelSession(remoteJid);
+      if (command.rest) {
+        await sock.sendPresenceUpdate('composing', remoteJid);
+        try {
+          const reply = (await sendPrompt(channel, command.rest)).trim();
+          if (reply) await replyText(sock, remoteJid, message, reply);
+        } finally {
+          await sock.sendPresenceUpdate('paused', remoteJid);
+        }
+      } else {
+        await replyText(sock, remoteJid, message, 'Started a new Anya session for this channel.');
+      }
+      return true;
+    case 'stop':
+      if (stopActiveRun(channel)) {
+        await replyText(sock, remoteJid, message, 'Stopped the active Anya reply for this channel.');
+      } else {
+        await replyText(sock, remoteJid, message, 'No active Anya reply is running for this channel.');
+      }
+      return true;
+    case 'status':
+      await replyText(
+        sock,
+        remoteJid,
+        message,
+        `Anya is connected. Channel: ${channel}. Active reply: ${activeRuns.has(channel) ? 'yes' : 'no'}.`
+      );
+      return true;
+    case 'help':
+      await replyText(
+        sock,
+        remoteJid,
+        message,
+        'Anya commands: /new, /reset, /stop, /status, /help. In groups, mention anya or start with /anya or /ask to chat.'
+      );
+      return true;
+  }
+  return false;
+}
+
 async function handleMessage(sock, message) {
   if (message.key.fromMe) return;
   const remoteJid = message.key.remoteJid;
   if (!remoteJid || remoteJid === 'status@broadcast') return;
 
   const rawText = extractText(message);
+  const command = parseSlashCommand(rawText);
+  if (isChannelSlashCommand(command)) {
+    try {
+      await handleSlashCommand(sock, remoteJid, message, command);
+    } catch (error) {
+      await replyText(sock, remoteJid, message, formatAnyaError(error));
+    }
+    return;
+  }
+
   if (!shouldRespond(rawText, remoteJid, message, sock)) return;
 
   const text = stripInvocation(rawText, message, sock);
   if (!text) return;
 
-  const channel = ensureChannel(remoteJid);
-  await sock.sendPresenceUpdate('composing', remoteJid);
   try {
-    const reply = runAnya([
-      'session-send',
-      '--endpoint',
-      endpoint,
-      '--channel',
-      channel,
-      '--wait',
-      text,
-    ]).trim();
+    const channel = await ensureChannel(remoteJid);
+    if (activeRuns.has(channel)) {
+      await replyText(
+        sock,
+        remoteJid,
+        message,
+        'Anya is already replying in this channel. Send /stop to cancel it first.'
+      );
+      return;
+    }
+
+    await sock.sendPresenceUpdate('composing', remoteJid);
+    const reply = (await sendPromptWithRecovery(remoteJid, channel, text)).trim();
     if (reply) {
-      await sock.sendMessage(remoteJid, { text: reply }, { quoted: message });
+      await replyText(sock, remoteJid, message, reply);
     }
   } catch (error) {
-    await sock.sendMessage(
-      remoteJid,
-      { text: `Anya error: ${error.message}` },
-      { quoted: message }
-    );
+    if (!isStoppedError(error)) {
+      await replyText(sock, remoteJid, message, formatAnyaError(error));
+    }
   } finally {
     await sock.sendPresenceUpdate('paused', remoteJid);
   }
@@ -643,5 +876,22 @@ mod tests {
     #[test]
     fn rejects_short_pair_phone_number() {
         assert!(normalize_pair_phone_number(Some("+12".to_string())).is_err());
+    }
+
+    #[test]
+    fn whatsapp_bridge_bounds_agent_runs() {
+        assert!(BRIDGE_MJS.contains("ANYA_WHATSAPP_REPLY_TIMEOUT_MS"));
+        assert!(BRIDGE_MJS.contains("activeRuns = new Map()"));
+        assert!(BRIDGE_MJS.contains("child.kill('SIGKILL')"));
+        assert!(BRIDGE_MJS.contains("Anya needs a fresh Codex login"));
+    }
+
+    #[test]
+    fn whatsapp_bridge_handles_channel_slash_commands() {
+        assert!(BRIDGE_MJS.contains("parseSlashCommand"));
+        assert!(BRIDGE_MJS.contains("['new', 'reset', 'stop', 'status', 'help']"));
+        assert!(BRIDGE_MJS.contains("Started a new Anya session for this channel."));
+        assert!(BRIDGE_MJS.contains("Stopped the active Anya reply for this channel."));
+        assert!(BRIDGE_MJS.contains("sendPromptWithRecovery"));
     }
 }

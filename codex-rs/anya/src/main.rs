@@ -34,6 +34,8 @@ use supports_color::Stream;
 use crate::channel::ChannelStore;
 use crate::codex_rpc::CodexRpcClient;
 
+const CHANNEL_SLASH_HELP: &str = "Anya commands: /new, /reset, /stop, /status, /help.";
+
 #[derive(Debug, Parser)]
 #[command(
     name = "anya",
@@ -228,6 +230,15 @@ struct RpcArgs {
     params: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ChannelSlashCommand {
+    New { rest: String },
+    Reset { rest: String },
+    Stop,
+    Status,
+    Help,
+}
+
 fn main() -> Result<()> {
     arg0_dispatch_or_else(|arg0_paths| async move { run(arg0_paths).await })
 }
@@ -355,6 +366,14 @@ async fn session_create(args: SessionCreateArgs) -> Result<()> {
 }
 
 async fn session_send(args: SessionSendArgs) -> Result<()> {
+    let message = args.message.join(" ");
+    if let (Some(channel), Some(command)) =
+        (args.channel.clone(), parse_channel_slash_command(&message))
+    {
+        return session_send_slash_command(&args.endpoint, channel, command, args.wait).await;
+    }
+
+    let channel = args.channel.clone();
     let thread_id = match (args.thread_id, args.channel) {
         (Some(thread_id), None) => thread_id,
         (None, Some(channel)) => ChannelStore::load()
@@ -365,28 +384,130 @@ async fn session_send(args: SessionSendArgs) -> Result<()> {
         (Some(_), Some(_)) => anyhow::bail!("pass either --thread-id or --channel, not both"),
         (None, None) => anyhow::bail!("pass --thread-id or --channel"),
     };
-    let message = args.message.join(" ");
     let mut client = CodexRpcClient::connect(&args.endpoint).await?;
     if args.wait {
-        let response = client.turn_start_collect(thread_id, message).await?;
+        let response = match client
+            .turn_start_collect(thread_id.clone(), message.clone())
+            .await
+        {
+            Ok(response) => response,
+            Err(error) if channel.is_some() && is_thread_not_found_error(&error) => {
+                let channel = channel
+                    .as_deref()
+                    .context("channel is required for stale thread recovery")?;
+                let thread_id = create_default_channel_thread(&mut client, channel).await?;
+                client.turn_start_collect(thread_id, message).await?
+            }
+            Err(error) => return Err(error),
+        };
         println!("{response}");
     } else {
-        let response = client.turn_start(thread_id, message).await?;
+        let response = match client.turn_start(thread_id.clone(), message.clone()).await {
+            Ok(response) => response,
+            Err(error) if channel.is_some() && is_thread_not_found_error(&error) => {
+                let channel = channel
+                    .as_deref()
+                    .context("channel is required for stale thread recovery")?;
+                let thread_id = create_default_channel_thread(&mut client, channel).await?;
+                client.turn_start(thread_id, message).await?
+            }
+            Err(error) => return Err(error),
+        };
         serde_json::to_writer_pretty(std::io::stdout(), &response)?;
         println!();
     }
     Ok(())
 }
 
+async fn session_send_slash_command(
+    endpoint: &str,
+    channel: String,
+    command: ChannelSlashCommand,
+    wait: bool,
+) -> Result<()> {
+    let mut client = CodexRpcClient::connect(endpoint).await?;
+    match command {
+        ChannelSlashCommand::New { rest } | ChannelSlashCommand::Reset { rest } => {
+            let thread_id = create_default_channel_thread(&mut client, &channel).await?;
+            if rest.is_empty() {
+                println!("Started a new Anya session for this channel.");
+            } else if wait {
+                let response = client.turn_start_collect(thread_id, rest).await?;
+                println!("{response}");
+            } else {
+                let response = client.turn_start(thread_id, rest).await?;
+                serde_json::to_writer_pretty(std::io::stdout(), &response)?;
+                println!();
+            }
+        }
+        ChannelSlashCommand::Stop => {
+            println!("No active Anya reply is tracked by this CLI process.");
+        }
+        ChannelSlashCommand::Status => {
+            let store = ChannelStore::load().await?;
+            if let Some(thread_id) = store.resolve(&channel) {
+                println!("Channel {channel} is bound to thread {thread_id}.");
+            } else {
+                println!("Channel {channel} is not bound to a session.");
+            }
+        }
+        ChannelSlashCommand::Help => println!("{CHANNEL_SLASH_HELP}"),
+    }
+    Ok(())
+}
+
+async fn create_default_channel_thread(
+    client: &mut CodexRpcClient,
+    channel: &str,
+) -> Result<String> {
+    let response = client.thread_start(/*model*/ None, /*cwd*/ None).await?;
+    let mut store = ChannelStore::load().await?;
+    store.bind(channel.to_string(), response.thread.id.clone());
+    store.save().await?;
+    Ok(response.thread.id)
+}
+
+fn is_thread_not_found_error(error: &anyhow::Error) -> bool {
+    error.to_string().contains("thread not found")
+}
+
+fn parse_channel_slash_command(message: &str) -> Option<ChannelSlashCommand> {
+    let trimmed = message.trim();
+    let without_slash = trimmed.strip_prefix('/')?;
+    let split_at = without_slash
+        .char_indices()
+        .find_map(|(idx, ch)| ch.is_whitespace().then_some(idx))
+        .unwrap_or(without_slash.len());
+    let (name_token, rest) = without_slash.split_at(split_at);
+    let name = name_token
+        .split('@')
+        .next()
+        .unwrap_or(name_token)
+        .trim_end_matches([':', ','])
+        .to_ascii_lowercase();
+    let rest = rest.trim().to_string();
+    match name.as_str() {
+        "new" => Some(ChannelSlashCommand::New { rest }),
+        "reset" => Some(ChannelSlashCommand::Reset { rest }),
+        "stop" => Some(ChannelSlashCommand::Stop),
+        "status" => Some(ChannelSlashCommand::Status),
+        "help" => Some(ChannelSlashCommand::Help),
+        _ => None,
+    }
+}
+
 async fn chat(args: ChatArgs) -> Result<()> {
+    let channel = args.channel;
+    let model = args.model;
+    let cwd = args.cwd;
     let mut store = ChannelStore::load().await?;
     let mut client = CodexRpcClient::connect(&args.endpoint).await?;
-    let thread_id = match store.resolve(&args.channel) {
+    let mut thread_id = match store.resolve(&channel) {
         Some(thread_id) => thread_id.to_string(),
         None => {
-            let response = client.thread_start(args.model, args.cwd).await?;
+            let response = client.thread_start(model.clone(), cwd.clone()).await?;
             let thread_id = response.thread.id;
-            store.bind(args.channel.clone(), thread_id.clone());
+            store.bind(channel.clone(), thread_id.clone());
             store.save().await?;
             thread_id
         }
@@ -409,11 +530,49 @@ async fn chat(args: ChatArgs) -> Result<()> {
         if matches!(message, "/exit" | "/quit") {
             break;
         }
+        if let Some(command) = parse_channel_slash_command(message) {
+            match command {
+                ChannelSlashCommand::New { rest } | ChannelSlashCommand::Reset { rest } => {
+                    let response = client.thread_start(model.clone(), cwd.clone()).await?;
+                    thread_id = response.thread.id;
+                    store.bind(channel.clone(), thread_id.clone());
+                    store.save().await?;
+                    if rest.is_empty() {
+                        println!("anya> Started a new Anya session for this channel.");
+                    } else {
+                        print!("anya> ");
+                        std::io::stdout().flush()?;
+                        client.turn_start_streaming(thread_id.clone(), rest).await?;
+                    }
+                }
+                ChannelSlashCommand::Stop => {
+                    println!("anya> No active Anya reply is running in this chat.");
+                }
+                ChannelSlashCommand::Status => {
+                    println!("anya> Channel {channel} is bound to thread {thread_id}.");
+                }
+                ChannelSlashCommand::Help => println!("anya> {CHANNEL_SLASH_HELP}"),
+            }
+            continue;
+        }
         print!("anya> ");
         std::io::stdout().flush()?;
-        client
+        match client
             .turn_start_streaming(thread_id.clone(), message.to_string())
-            .await?;
+            .await
+        {
+            Ok(()) => {}
+            Err(error) if is_thread_not_found_error(&error) => {
+                let response = client.thread_start(model.clone(), cwd.clone()).await?;
+                thread_id = response.thread.id;
+                store.bind(channel.clone(), thread_id.clone());
+                store.save().await?;
+                client
+                    .turn_start_streaming(thread_id.clone(), message.to_string())
+                    .await?;
+            }
+            Err(error) => return Err(error),
+        }
     }
     Ok(())
 }
@@ -489,4 +648,31 @@ async fn rpc(args: RpcArgs) -> Result<()> {
     serde_json::to_writer_pretty(std::io::stdout(), &response)?;
     println!();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn parses_channel_slash_commands() {
+        assert_eq!(
+            Some(ChannelSlashCommand::New {
+                rest: "summarize recent commits".to_string(),
+            }),
+            parse_channel_slash_command("/new summarize recent commits")
+        );
+        assert_eq!(
+            Some(ChannelSlashCommand::Reset {
+                rest: "soft".to_string(),
+            }),
+            parse_channel_slash_command("/reset: soft")
+        );
+        assert_eq!(
+            Some(ChannelSlashCommand::Stop),
+            parse_channel_slash_command("/stop@anya")
+        );
+        assert_eq!(None, parse_channel_slash_command("/model gpt-5.5"));
+    }
 }
