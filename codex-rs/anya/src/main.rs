@@ -81,6 +81,10 @@ struct ServeArgs {
     /// Session source passed through to Codex.
     #[arg(long, default_value = "vscode")]
     session_source: String,
+
+    /// Do not start configured channel bridges from the Anya gateway service.
+    #[arg(long)]
+    no_channels: bool,
 }
 
 #[derive(Debug, Args)]
@@ -283,6 +287,11 @@ async fn serve(args: ServeArgs, arg0_paths: Arg0DispatchPaths) -> Result<()> {
         .map_err(|err| anyhow::anyhow!(err))?;
     let session_source = SessionSource::from_startup_arg(&args.session_source)
         .map_err(|err| anyhow::anyhow!(err))?;
+    let _whatsapp_bridge = if args.no_channels {
+        None
+    } else {
+        whatsapp::spawn_gateway_bridge(&args.listen).await?
+    };
     codex_app_server::run_main_with_transport_options(
         arg0_paths,
         CliConfigOverrides::default(),

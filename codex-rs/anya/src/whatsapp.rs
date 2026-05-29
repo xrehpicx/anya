@@ -1,12 +1,21 @@
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::time::Duration;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 use anyhow::Context;
 use anyhow::Result;
 use clap::Args;
 use clap::Subcommand;
+use serde::Deserialize;
+use serde::Serialize;
+use tokio::io::AsyncBufReadExt;
 use tokio::io::AsyncWriteExt;
+use tokio::io::BufReader;
+use tokio::process::Child;
 use tokio::process::Command;
+use tokio::task::JoinHandle;
 
 #[derive(Debug, Args)]
 pub struct WhatsappArgs {
@@ -22,8 +31,6 @@ enum WhatsappCommand {
     Install(WhatsappInstallArgs),
     /// Run the WhatsApp bridge in the foreground.
     Bridge(WhatsappBridgeArgs),
-    /// Print a systemd user unit for the WhatsApp bridge.
-    PrintService(WhatsappServiceArgs),
 }
 
 #[derive(Debug, Args)]
@@ -49,14 +56,15 @@ struct WhatsappSetupArgs {
     phone_number: Option<String>,
     #[arg(long)]
     anya_binary: Option<PathBuf>,
-    /// Write ~/.config/systemd/user/anya-whatsapp.service during setup.
+    /// Run the bridge directly in this terminal instead of configuring the Anya gateway service.
     #[arg(long)]
-    install_user_service: bool,
-    #[arg(long, default_value = "anya-whatsapp")]
-    service_name: String,
-    /// Install files and optional service unit without starting the bridge.
+    foreground: bool,
+    /// Install files and write gateway config without restarting anya.service.
     #[arg(long)]
     no_run: bool,
+    /// Name of the existing systemd user service that runs `anya serve`.
+    #[arg(long, default_value = "anya")]
+    gateway_service_name: String,
     #[arg(long)]
     skip_npm_install: bool,
 }
@@ -78,12 +86,12 @@ struct WhatsappBridgeArgs {
     anya_binary: Option<PathBuf>,
 }
 
-#[derive(Debug, Args)]
-struct WhatsappServiceArgs {
-    #[arg(long)]
-    dir: Option<PathBuf>,
-    #[arg(long)]
-    anya_binary: Option<PathBuf>,
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct WhatsappBridgeConfig {
+    endpoint: String,
+    channel_prefix: String,
+    bot_name: String,
+    phone_number: Option<String>,
 }
 
 pub async fn run(args: WhatsappArgs) -> Result<()> {
@@ -91,7 +99,6 @@ pub async fn run(args: WhatsappArgs) -> Result<()> {
         WhatsappCommand::Setup(args) => setup(args).await,
         WhatsappCommand::Install(args) => install(args).await,
         WhatsappCommand::Bridge(args) => bridge(args).await,
-        WhatsappCommand::PrintService(args) => print_service(args),
     }
 }
 
@@ -103,26 +110,19 @@ async fn install(args: WhatsappInstallArgs) -> Result<()> {
 }
 
 async fn setup(args: WhatsappSetupArgs) -> Result<()> {
-    if args.install_user_service && !cfg!(target_os = "linux") {
-        anyhow::bail!("--install-user-service is only supported on Linux");
-    }
     let dir = bridge_dir(args.dir)?;
     install_bridge_files(&dir, args.skip_npm_install).await?;
 
     let anya_binary = resolve_anya_binary(args.anya_binary);
-    if args.install_user_service {
-        install_user_service(&args.service_name, &anya_binary, &dir).await?;
-    }
+    let config = WhatsappBridgeConfig {
+        endpoint: args.endpoint,
+        channel_prefix: args.channel_prefix,
+        bot_name: args.bot_name,
+        phone_number: normalize_pair_phone_number(args.phone_number)?,
+    };
 
     println!("WhatsApp bridge installed in {}", dir.display());
-    if args.no_run {
-        if !args.install_user_service {
-            print_setup_next_steps(&dir);
-        }
-        return Ok(());
-    }
-
-    if args.phone_number.is_some() {
+    if config.phone_number.is_some() {
         println!(
             "Starting WhatsApp bridge. Use the pairing code printed below from WhatsApp > Linked devices > Link with phone number instead."
         );
@@ -130,15 +130,66 @@ async fn setup(args: WhatsappSetupArgs) -> Result<()> {
         println!("Starting WhatsApp bridge. Scan the QR from WhatsApp > Linked devices.");
     }
 
+    if !args.foreground {
+        write_config(&dir, &config).await?;
+        println!("WhatsApp channel configured for the Anya gateway service.");
+        if args.no_run {
+            print_setup_next_steps(&args.gateway_service_name);
+            return Ok(());
+        }
+        let since = unix_timestamp_secs()?;
+        restart_gateway_service(&args.gateway_service_name).await?;
+        println!(
+            "WhatsApp bridge is running inside {}.service. Showing setup logs; this command exits after the bridge connects.",
+            args.gateway_service_name
+        );
+        println!("Press Ctrl-C to stop watching logs; the Anya gateway service will keep running.");
+        return follow_gateway_setup_logs(&args.gateway_service_name, since).await;
+    }
+
     bridge(WhatsappBridgeArgs {
         dir: Some(dir),
-        endpoint: args.endpoint,
-        channel_prefix: args.channel_prefix,
-        bot_name: args.bot_name,
-        phone_number: args.phone_number,
+        endpoint: config.endpoint,
+        channel_prefix: config.channel_prefix,
+        bot_name: config.bot_name,
+        phone_number: config.phone_number,
         anya_binary: Some(anya_binary),
     })
     .await
+}
+
+pub async fn spawn_gateway_bridge(default_endpoint: &str) -> Result<Option<JoinHandle<()>>> {
+    let dir = bridge_dir(None)?;
+    let config_path = config_path(&dir);
+    if !config_path.exists() {
+        return Ok(None);
+    }
+    let mut config = read_config(&dir).await?;
+    if config.endpoint.is_empty() {
+        config.endpoint = default_endpoint.to_string();
+    }
+    let anya_binary = resolve_anya_binary(None);
+    let handle = tokio::spawn(async move {
+        loop {
+            match spawn_bridge_process(&dir, &anya_binary, &config).await {
+                Ok(mut child) => match child.wait().await {
+                    Ok(status) => {
+                        eprintln!("Anya WhatsApp bridge exited with {status}; restarting in 2s");
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "Failed to wait for Anya WhatsApp bridge: {error}; restarting in 2s"
+                        );
+                    }
+                },
+                Err(error) => {
+                    eprintln!("Failed to start Anya WhatsApp bridge: {error}; retrying in 2s");
+                }
+            }
+            std::thread::sleep(Duration::from_secs(2));
+        }
+    });
+    Ok(Some(handle))
 }
 
 async fn install_bridge_files(dir: &std::path::Path, skip_npm_install: bool) -> Result<()> {
@@ -168,83 +219,132 @@ async fn bridge(args: WhatsappBridgeArgs) -> Result<()> {
     }
 
     let anya_binary = resolve_anya_binary(args.anya_binary);
-    let phone_number = normalize_pair_phone_number(args.phone_number)?;
-    let mut command = Command::new("node");
-    command
-        .arg(dir.join("bridge.mjs"))
-        .env("ANYA_BINARY", anya_binary)
-        .env("ANYA_ENDPOINT", args.endpoint)
-        .env("ANYA_CHANNEL_PREFIX", args.channel_prefix)
-        .env("ANYA_BOT_NAME", args.bot_name)
-        .env("ANYA_WHATSAPP_SESSION_DIR", dir.join("session"))
-        .current_dir(&dir);
-    if let Some(phone_number) = phone_number {
-        command.env("ANYA_WHATSAPP_PAIR_PHONE", phone_number);
-    }
-
-    let status = command.status().await.context("run WhatsApp bridge")?;
+    let config = WhatsappBridgeConfig {
+        endpoint: args.endpoint,
+        channel_prefix: args.channel_prefix,
+        bot_name: args.bot_name,
+        phone_number: normalize_pair_phone_number(args.phone_number)?,
+    };
+    let status = bridge_command(&dir, &anya_binary, &config)
+        .status()
+        .await
+        .context("run WhatsApp bridge")?;
     if !status.success() {
         anyhow::bail!("WhatsApp bridge exited with {status}");
     }
     Ok(())
 }
 
-fn print_service(args: WhatsappServiceArgs) -> Result<()> {
-    let dir = bridge_dir(args.dir)?;
-    let binary = resolve_anya_binary(args.anya_binary);
-    println!("{}", whatsapp_systemd_unit(&binary, &dir).trim_end());
-    Ok(())
-}
-
-async fn install_user_service(
-    service_name: &str,
-    binary: &std::path::Path,
+async fn spawn_bridge_process(
     dir: &std::path::Path,
-) -> Result<()> {
-    if !cfg!(target_os = "linux") {
-        anyhow::bail!("--install-user-service is only supported on Linux");
+    binary: &std::path::Path,
+    config: &WhatsappBridgeConfig,
+) -> Result<Child> {
+    bridge_command(dir, binary, config)
+        .kill_on_drop(true)
+        .spawn()
+        .context("start WhatsApp bridge")
+}
+
+fn bridge_command(
+    dir: &std::path::Path,
+    binary: &std::path::Path,
+    config: &WhatsappBridgeConfig,
+) -> Command {
+    let mut command = Command::new("node");
+    command
+        .arg(dir.join("bridge.mjs"))
+        .env("ANYA_BINARY", binary)
+        .env("ANYA_ENDPOINT", &config.endpoint)
+        .env("ANYA_CHANNEL_PREFIX", &config.channel_prefix)
+        .env("ANYA_BOT_NAME", &config.bot_name)
+        .env("ANYA_WHATSAPP_SESSION_DIR", dir.join("session"))
+        .current_dir(dir);
+    if let Some(phone_number) = &config.phone_number {
+        command.env("ANYA_WHATSAPP_PAIR_PHONE", phone_number);
     }
-    let config_dir = dirs::config_dir()
-        .context("resolve user config directory")?
-        .join("systemd")
-        .join("user");
-    tokio::fs::create_dir_all(&config_dir).await?;
-    let path = config_dir.join(format!("{service_name}.service"));
-    write_file(path.clone(), &whatsapp_systemd_unit(binary, dir)).await?;
-    println!("Installed user service: {}", path.display());
-    println!("Run: systemctl --user daemon-reload");
-    println!("Run: systemctl --user enable --now {service_name}.service");
+    command
+}
+
+async fn run_systemctl(args: &[&str], action: &str) -> Result<()> {
+    let output = Command::new("systemctl")
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .with_context(|| format!("{action} with systemctl"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if stderr.is_empty() { stdout } else { stderr };
+        anyhow::bail!("systemctl failed to {action}: {detail}");
+    }
     Ok(())
 }
 
-fn print_setup_next_steps(dir: &std::path::Path) {
-    println!("Next steps:");
-    println!("  anya whatsapp bridge --dir {}", dir.display());
-    println!(
-        "  anya whatsapp print-service --anya-binary ~/.local/bin/anya > ~/.config/systemd/user/anya-whatsapp.service"
-    );
-    println!("  systemctl --user daemon-reload");
-    println!("  systemctl --user enable --now anya-whatsapp.service");
+async fn restart_gateway_service(service_name: &str) -> Result<()> {
+    let service_unit = service_unit_name(service_name);
+    run_systemctl(
+        &["--user", "restart", &service_unit],
+        "restart Anya service",
+    )
+    .await?;
+    println!("Restarted gateway service: {service_unit}");
+    Ok(())
 }
 
-fn whatsapp_systemd_unit(binary: &std::path::Path, dir: &std::path::Path) -> String {
-    format!(
-        concat!(
-            "[Unit]\n",
-            "Description=Anya WhatsApp bridge\n",
-            "After=network-online.target anya.service\n",
-            "Wants=network-online.target anya.service\n\n",
-            "[Service]\n",
-            "Type=simple\n",
-            "Restart=on-failure\n",
-            "RestartSec=2s\n",
-            "ExecStart={} whatsapp bridge --dir {}\n\n",
-            "[Install]\n",
-            "WantedBy=default.target\n"
-        ),
-        binary.display(),
-        dir.display()
-    )
+async fn follow_gateway_setup_logs(service_name: &str, since: u64) -> Result<()> {
+    let service_unit = service_unit_name(service_name);
+    let mut child = Command::new("journalctl")
+        .args(["--user", "-u", &service_unit, "--since"])
+        .arg(format!("@{since}"))
+        .args(["-f", "-o", "cat"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("follow logs for {service_unit}"))?;
+    let stdout = child.stdout.take().context("capture journalctl stdout")?;
+    let mut lines = BufReader::new(stdout).lines();
+    while let Some(line) = lines.next_line().await? {
+        println!("{line}");
+        if line.contains("Anya WhatsApp bridge connected.") {
+            child.start_kill().ok();
+            let _ = child.wait().await;
+            return Ok(());
+        }
+        if line.contains("WhatsApp logged out.") {
+            child.start_kill().ok();
+            let _ = child.wait().await;
+            anyhow::bail!("WhatsApp logged out. Remove the session directory and pair again.");
+        }
+    }
+    let status = child.wait().await.context("wait for journalctl")?;
+    if !status.success() {
+        anyhow::bail!("journalctl exited with {status}");
+    }
+    Ok(())
+}
+
+fn unix_timestamp_secs() -> Result<u64> {
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("current time is before Unix epoch")?
+        .as_secs())
+}
+
+fn service_unit_name(service_name: &str) -> String {
+    if service_name.ends_with(".service") {
+        service_name.to_string()
+    } else {
+        format!("{service_name}.service")
+    }
+}
+
+fn print_setup_next_steps(service_name: &str) {
+    let service_unit = service_unit_name(service_name);
+    println!("Next steps:");
+    println!("  systemctl --user restart {service_unit}");
+    println!("  journalctl --user -u {service_unit} -f");
 }
 
 fn resolve_anya_binary(explicit: Option<PathBuf>) -> PathBuf {
@@ -277,6 +377,23 @@ fn bridge_dir(explicit: Option<PathBuf>) -> Result<PathBuf> {
     }
     let base = dirs::data_dir().context("resolve user data directory")?;
     Ok(base.join("anya").join("whatsapp"))
+}
+
+fn config_path(dir: &std::path::Path) -> PathBuf {
+    dir.join("config.json")
+}
+
+async fn read_config(dir: &std::path::Path) -> Result<WhatsappBridgeConfig> {
+    let path = config_path(dir);
+    let contents = tokio::fs::read_to_string(&path)
+        .await
+        .with_context(|| format!("read {}", path.display()))?;
+    serde_json::from_str(&contents).with_context(|| format!("parse {}", path.display()))
+}
+
+async fn write_config(dir: &std::path::Path, config: &WhatsappBridgeConfig) -> Result<()> {
+    let contents = serde_json::to_string_pretty(config).context("serialize WhatsApp config")?;
+    write_file(config_path(dir), &(contents + "\n")).await
 }
 
 const PACKAGE_JSON: &str = r#"{
@@ -505,16 +622,9 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     #[test]
-    fn whatsapp_user_service_targets_default_target() {
-        let unit = whatsapp_systemd_unit(
-            std::path::Path::new("/home/raj/.local/bin/anya"),
-            std::path::Path::new("/home/raj/.local/share/anya/whatsapp"),
-        );
-
-        assert!(unit.contains("WantedBy=default.target\n"));
-        assert!(unit.contains(
-            "ExecStart=/home/raj/.local/bin/anya whatsapp bridge --dir /home/raj/.local/share/anya/whatsapp\n"
-        ));
+    fn service_unit_name_accepts_bare_name_or_unit() {
+        assert_eq!("anya.service", service_unit_name("anya"));
+        assert_eq!("anya.service", service_unit_name("anya.service"));
     }
 
     #[test]
