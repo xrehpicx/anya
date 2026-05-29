@@ -61,7 +61,7 @@ enum CommandKind {
     /// Install or print a systemd unit for Anya.
     Service(ServiceArgs),
     /// Install and run the WhatsApp bridge channel.
-    Whatsapp(whatsapp::WhatsappArgs),
+    Whatsapp(Box<whatsapp::WhatsappArgs>),
     /// Create, list, and bind generalized chat channels to Codex threads.
     #[command(alias = "channels")]
     Channel(ChannelArgs),
@@ -197,7 +197,7 @@ enum ChannelCommand {
         name: String,
     },
     /// Configure a WhatsApp-backed channel bridge.
-    Whatsapp(whatsapp::WhatsappArgs),
+    Whatsapp(Box<whatsapp::WhatsappArgs>),
 }
 
 #[derive(Debug, Args)]
@@ -273,7 +273,7 @@ async fn run(arg0_paths: Arg0DispatchPaths) -> Result<()> {
         CommandKind::Auth(args) => auth(args).await,
         CommandKind::Logout(args) => logout(args).await,
         CommandKind::Service(args) => service(args).await,
-        CommandKind::Whatsapp(args) => whatsapp::run(args).await,
+        CommandKind::Whatsapp(args) => whatsapp::run(*args).await,
         CommandKind::Channel(args) => channel(args).await,
         CommandKind::SessionCreate(args) => session_create(args).await,
         CommandKind::SessionSend(args) => session_send(args).await,
@@ -427,7 +427,7 @@ async fn channel(args: ChannelArgs) -> Result<()> {
                 .with_context(|| format!("unknown channel {name:?}"))?;
             println!("{thread_id}");
         }
-        ChannelCommand::Whatsapp(args) => whatsapp::run(args).await?,
+        ChannelCommand::Whatsapp(args) => whatsapp::run(*args).await?,
     }
     Ok(())
 }
@@ -454,7 +454,7 @@ async fn session_send(args: SessionSendArgs) -> Result<()> {
     }
 
     let channel = args.channel.clone();
-    let thread_id = match (args.thread_id, args.channel) {
+    let mut thread_id = match (args.thread_id, args.channel) {
         (Some(thread_id), None) => thread_id,
         (None, Some(channel)) => ChannelStore::load()
             .await?
@@ -465,6 +465,16 @@ async fn session_send(args: SessionSendArgs) -> Result<()> {
         (None, None) => anyhow::bail!("pass --thread-id or --channel"),
     };
     let mut client = CodexRpcClient::connect(&args.endpoint).await?;
+    match client.thread_resume(thread_id.clone()).await {
+        Ok(_) => {}
+        Err(error) if channel.is_some() && is_thread_not_found_error(&error) => {
+            let channel = channel
+                .as_deref()
+                .context("channel is required for stale thread recovery")?;
+            thread_id = create_default_channel_thread(&mut client, channel).await?;
+        }
+        Err(error) => return Err(error),
+    }
     if args.wait {
         let response = match client
             .turn_start_collect(thread_id.clone(), message.clone())
@@ -592,6 +602,7 @@ async fn chat(args: ChatArgs) -> Result<()> {
             thread_id
         }
     };
+    client.thread_resume(thread_id.clone()).await?;
 
     let stdin = std::io::stdin();
     let mut stdin = stdin.lock();

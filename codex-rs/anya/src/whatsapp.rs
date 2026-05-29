@@ -31,6 +31,8 @@ enum WhatsappCommand {
     Install(WhatsappInstallArgs),
     /// Run the WhatsApp bridge in the foreground.
     Bridge(WhatsappBridgeArgs),
+    /// Print or update WhatsApp channel access config.
+    Config(WhatsappConfigArgs),
 }
 
 #[derive(Debug, Args)]
@@ -67,6 +69,27 @@ struct WhatsappSetupArgs {
     gateway_service_name: String,
     #[arg(long)]
     skip_npm_install: bool,
+    /// DM access policy: open, allowlist, or disabled.
+    #[arg(long, default_value = "open")]
+    dm_policy: String,
+    /// Group access policy: open, allowlist, or disabled.
+    #[arg(long, default_value = "open")]
+    group_policy: String,
+    /// Allowed DM senders. Accepts E.164 numbers, raw digits, JIDs, or "*".
+    #[arg(long, value_delimiter = ',')]
+    allow_from: Vec<String>,
+    /// Blocked senders. Deny wins over allow.
+    #[arg(long, value_delimiter = ',')]
+    block_from: Vec<String>,
+    /// Allowed group senders for groupPolicy=allowlist. Falls back to allowFrom if empty.
+    #[arg(long, value_delimiter = ',')]
+    group_allow_from: Vec<String>,
+    /// Allowed group chat JIDs. If set, groups not listed here are ignored unless "*" is listed.
+    #[arg(long, value_delimiter = ',')]
+    groups: Vec<String>,
+    /// Require mention/name invocation in group chats.
+    #[arg(long, default_value_t = true)]
+    require_mention: bool,
 }
 
 #[derive(Debug, Args)]
@@ -86,12 +109,63 @@ struct WhatsappBridgeArgs {
     anya_binary: Option<PathBuf>,
 }
 
+#[derive(Debug, Args)]
+struct WhatsappConfigArgs {
+    #[command(subcommand)]
+    command: WhatsappConfigCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum WhatsappConfigCommand {
+    /// Print the persisted WhatsApp bridge config.
+    Print {
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
+    /// Update persisted WhatsApp access config. Omitted fields are left unchanged.
+    Set(WhatsappConfigSetArgs),
+}
+
+#[derive(Debug, Args)]
+struct WhatsappConfigSetArgs {
+    #[arg(long)]
+    dir: Option<PathBuf>,
+    #[arg(long)]
+    dm_policy: Option<String>,
+    #[arg(long)]
+    group_policy: Option<String>,
+    #[arg(long, value_delimiter = ',')]
+    allow_from: Option<Vec<String>>,
+    #[arg(long, value_delimiter = ',')]
+    block_from: Option<Vec<String>>,
+    #[arg(long, value_delimiter = ',')]
+    group_allow_from: Option<Vec<String>>,
+    #[arg(long, value_delimiter = ',')]
+    groups: Option<Vec<String>>,
+    #[arg(long)]
+    require_mention: Option<bool>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct WhatsappBridgeConfig {
     endpoint: String,
     channel_prefix: String,
     bot_name: String,
     phone_number: Option<String>,
+    #[serde(default = "default_open_policy")]
+    dm_policy: String,
+    #[serde(default = "default_open_policy")]
+    group_policy: String,
+    #[serde(default)]
+    allow_from: Vec<String>,
+    #[serde(default)]
+    block_from: Vec<String>,
+    #[serde(default)]
+    group_allow_from: Vec<String>,
+    #[serde(default)]
+    groups: Vec<String>,
+    #[serde(default = "default_require_mention")]
+    require_mention: bool,
 }
 
 pub async fn run(args: WhatsappArgs) -> Result<()> {
@@ -99,6 +173,7 @@ pub async fn run(args: WhatsappArgs) -> Result<()> {
         WhatsappCommand::Setup(args) => setup(args).await,
         WhatsappCommand::Install(args) => install(args).await,
         WhatsappCommand::Bridge(args) => bridge(args).await,
+        WhatsappCommand::Config(args) => config(args).await,
     }
 }
 
@@ -124,6 +199,13 @@ async fn setup(args: WhatsappSetupArgs) -> Result<()> {
         channel_prefix: args.channel_prefix,
         bot_name: args.bot_name,
         phone_number: normalize_pair_phone_number(args.phone_number)?,
+        dm_policy: normalize_policy(&args.dm_policy, "dm-policy")?,
+        group_policy: normalize_policy(&args.group_policy, "group-policy")?,
+        allow_from: normalize_list(args.allow_from),
+        block_from: normalize_list(args.block_from),
+        group_allow_from: normalize_list(args.group_allow_from),
+        groups: normalize_list(args.groups),
+        require_mention: args.require_mention,
     };
 
     println!("WhatsApp bridge installed in {}", dir.display());
@@ -161,6 +243,46 @@ async fn setup(args: WhatsappSetupArgs) -> Result<()> {
         anya_binary: Some(anya_binary),
     })
     .await
+}
+
+async fn config(args: WhatsappConfigArgs) -> Result<()> {
+    match args.command {
+        WhatsappConfigCommand::Print { dir } => {
+            let dir = bridge_dir(dir)?;
+            let config = read_config(&dir).await?;
+            serde_json::to_writer_pretty(std::io::stdout(), &config)?;
+            println!();
+        }
+        WhatsappConfigCommand::Set(args) => {
+            let dir = bridge_dir(args.dir)?;
+            let mut config = read_config(&dir).await?;
+            if let Some(policy) = args.dm_policy {
+                config.dm_policy = normalize_policy(&policy, "dm-policy")?;
+            }
+            if let Some(policy) = args.group_policy {
+                config.group_policy = normalize_policy(&policy, "group-policy")?;
+            }
+            if let Some(list) = args.allow_from {
+                config.allow_from = normalize_list(list);
+            }
+            if let Some(list) = args.block_from {
+                config.block_from = normalize_list(list);
+            }
+            if let Some(list) = args.group_allow_from {
+                config.group_allow_from = normalize_list(list);
+            }
+            if let Some(list) = args.groups {
+                config.groups = normalize_list(list);
+            }
+            if let Some(require_mention) = args.require_mention {
+                config.require_mention = require_mention;
+            }
+            write_config(&dir, &config).await?;
+            serde_json::to_writer_pretty(std::io::stdout(), &config)?;
+            println!();
+        }
+    }
+    Ok(())
 }
 
 pub async fn spawn_gateway_bridge(default_endpoint: &str) -> Result<Option<JoinHandle<()>>> {
@@ -229,6 +351,13 @@ async fn bridge(args: WhatsappBridgeArgs) -> Result<()> {
         channel_prefix: args.channel_prefix,
         bot_name: args.bot_name,
         phone_number: normalize_pair_phone_number(args.phone_number)?,
+        dm_policy: default_open_policy(),
+        group_policy: default_open_policy(),
+        allow_from: Vec::new(),
+        block_from: Vec::new(),
+        group_allow_from: Vec::new(),
+        groups: Vec::new(),
+        require_mention: default_require_mention(),
     };
     let status = bridge_command(&dir, &anya_binary, &config)
         .status()
@@ -264,6 +393,19 @@ fn bridge_command(
         .env("ANYA_CHANNEL_PREFIX", &config.channel_prefix)
         .env("ANYA_BOT_NAME", &config.bot_name)
         .env("ANYA_WHATSAPP_SESSION_DIR", dir.join("session"))
+        .env("ANYA_WHATSAPP_DM_POLICY", &config.dm_policy)
+        .env("ANYA_WHATSAPP_GROUP_POLICY", &config.group_policy)
+        .env("ANYA_WHATSAPP_ALLOW_FROM", config.allow_from.join(","))
+        .env("ANYA_WHATSAPP_BLOCK_FROM", config.block_from.join(","))
+        .env(
+            "ANYA_WHATSAPP_GROUP_ALLOW_FROM",
+            config.group_allow_from.join(","),
+        )
+        .env("ANYA_WHATSAPP_GROUPS", config.groups.join(","))
+        .env(
+            "ANYA_WHATSAPP_REQUIRE_MENTION",
+            if config.require_mention { "1" } else { "0" },
+        )
         .current_dir(dir);
     if let Some(phone_number) = &config.phone_number {
         command.env("ANYA_WHATSAPP_PAIR_PHONE", phone_number);
@@ -367,6 +509,30 @@ fn normalize_pair_phone_number(phone_number: Option<String>) -> Result<Option<St
     Ok(Some(digits))
 }
 
+fn default_open_policy() -> String {
+    "open".to_string()
+}
+
+fn default_require_mention() -> bool {
+    true
+}
+
+fn normalize_policy(value: &str, name: &str) -> Result<String> {
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "open" | "allowlist" | "disabled" => Ok(normalized),
+        _ => anyhow::bail!("{name} must be one of: open, allowlist, disabled"),
+    }
+}
+
+fn normalize_list(values: Vec<String>) -> Vec<String> {
+    values
+        .into_iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect()
+}
+
 async fn write_file(path: PathBuf, contents: &str) -> Result<()> {
     let mut file = tokio::fs::File::create(&path)
         .await
@@ -427,6 +593,13 @@ const anyaBinary = process.env.ANYA_BINARY || 'anya';
 const endpoint = process.env.ANYA_ENDPOINT || 'ws://127.0.0.1:4827';
 const channelPrefix = process.env.ANYA_CHANNEL_PREFIX || 'whatsapp';
 const botName = (process.env.ANYA_BOT_NAME || 'anya').toLowerCase();
+const dmPolicy = normalizePolicy(process.env.ANYA_WHATSAPP_DM_POLICY, 'open');
+const groupPolicy = normalizePolicy(process.env.ANYA_WHATSAPP_GROUP_POLICY, 'open');
+const allowFrom = parseListEnv(process.env.ANYA_WHATSAPP_ALLOW_FROM);
+const blockFrom = parseListEnv(process.env.ANYA_WHATSAPP_BLOCK_FROM);
+const groupAllowFrom = parseListEnv(process.env.ANYA_WHATSAPP_GROUP_ALLOW_FROM);
+const allowedGroups = parseListEnv(process.env.ANYA_WHATSAPP_GROUPS);
+const requireMention = parseBoolEnv(process.env.ANYA_WHATSAPP_REQUIRE_MENTION, true);
 const pairPhoneNumber = (process.env.ANYA_WHATSAPP_PAIR_PHONE || '').replace(/\D/g, '');
 const commandTimeoutMs = parseTimeout(
   process.env.ANYA_WHATSAPP_COMMAND_TIMEOUT_MS,
@@ -453,6 +626,23 @@ class AnyaRunStoppedError extends Error {
 function parseTimeout(value, fallback) {
   const parsed = Number.parseInt(value || '', 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function parseListEnv(value) {
+  return (value || '')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function parseBoolEnv(value, fallback) {
+  if (value === undefined || value === '') return fallback;
+  return ['1', 'true', 'yes', 'on'].includes(String(value).trim().toLowerCase());
+}
+
+function normalizePolicy(value, fallback) {
+  const normalized = String(value || fallback).trim().toLowerCase();
+  return ['open', 'allowlist', 'disabled'].includes(normalized) ? normalized : fallback;
 }
 
 function runAnya(args, options = {}) {
@@ -579,6 +769,70 @@ function isGroup(remoteJid) {
   return remoteJid.endsWith('@g.us');
 }
 
+function normalizeAccessId(value) {
+  return String(value || '')
+    .trim()
+    .replace(/^whatsapp:/i, '')
+    .replace(/^\+/, '')
+    .toLowerCase();
+}
+
+function accessIdsForMessage(message, remoteJid) {
+  const ids = new Set();
+  for (const value of [remoteJid, message?.key?.participant]) {
+    const normalized = normalizeAccessId(value);
+    if (!normalized) continue;
+    ids.add(normalized);
+    const bare = normalized.split('@')[0];
+    if (bare) ids.add(bare);
+    const digits = bare.replace(/\D/g, '');
+    if (digits) ids.add(digits);
+  }
+  return ids;
+}
+
+function listMatches(ids, list) {
+  return list.some((entry) => {
+    const normalized = normalizeAccessId(entry);
+    if (normalized === '*') return true;
+    if (ids.has(normalized)) return true;
+    const bare = normalized.split('@')[0];
+    if (bare && ids.has(bare)) return true;
+    const digits = bare.replace(/\D/g, '');
+    return Boolean(digits && ids.has(digits));
+  });
+}
+
+function isAllowedInbound(message, remoteJid) {
+  const ids = accessIdsForMessage(message, remoteJid);
+  if (listMatches(ids, blockFrom)) {
+    return { allowed: false, reason: 'sender blocked by blockFrom' };
+  }
+
+  if (isGroup(remoteJid)) {
+    if (groupPolicy === 'disabled') {
+      return { allowed: false, reason: 'groupPolicy=disabled' };
+    }
+    const groupIds = new Set([normalizeAccessId(remoteJid)]);
+    if (allowedGroups.length > 0 && !listMatches(groupIds, allowedGroups)) {
+      return { allowed: false, reason: 'group not listed in groups' };
+    }
+    const groupAllowList = groupAllowFrom.length > 0 ? groupAllowFrom : allowFrom;
+    if (groupPolicy === 'allowlist' && !listMatches(ids, groupAllowList)) {
+      return { allowed: false, reason: 'sender not in group allowlist' };
+    }
+    return { allowed: true, reason: 'group allowed' };
+  }
+
+  if (dmPolicy === 'disabled') {
+    return { allowed: false, reason: 'dmPolicy=disabled' };
+  }
+  if (dmPolicy === 'allowlist' && !listMatches(ids, allowFrom)) {
+    return { allowed: false, reason: 'sender not in allowFrom' };
+  }
+  return { allowed: true, reason: 'dm allowed' };
+}
+
 function escapeRegex(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -608,6 +862,7 @@ function stripInvocation(text, message, sock) {
 function shouldRespond(text, remoteJid, message, sock) {
   if (!text) return false;
   if (!isGroup(remoteJid)) return true;
+  if (!requireMention) return true;
   const lower = text.toLowerCase();
   return (
     lower === botName ||
@@ -770,7 +1025,7 @@ async function handleSlashCommand(sock, remoteJid, message, command) {
 async function handleMessage(sock, message) {
   if (message.key.fromMe) return;
   const remoteJid = message.key.remoteJid;
-  if (!remoteJid || remoteJid === 'status@broadcast') return;
+  if (!remoteJid || remoteJid === 'status@broadcast' || remoteJid.endsWith('@newsletter')) return;
 
   const rawText = extractText(message);
   const command = parseSlashCommand(rawText);
@@ -782,6 +1037,15 @@ async function handleMessage(sock, message) {
     command: command?.name || null,
     textLength: rawText.length,
   }));
+  const access = isAllowedInbound(message, remoteJid);
+  if (!access.allowed) {
+    console.log(JSON.stringify({
+      event: 'whatsapp_message_dropped',
+      remoteJid,
+      reason: access.reason,
+    }));
+    return;
+  }
   if (isChannelSlashCommand(command)) {
     try {
       await handleSlashCommand(sock, remoteJid, message, command);
@@ -928,5 +1192,14 @@ mod tests {
         assert!(BRIDGE_MJS.contains("Stopped the active Anya reply for this channel."));
         assert!(BRIDGE_MJS.contains("sendPromptWithRecovery"));
         assert!(BRIDGE_MJS.contains("{ quoted: true }"));
+    }
+
+    #[test]
+    fn whatsapp_bridge_enforces_access_config() {
+        assert!(BRIDGE_MJS.contains("ANYA_WHATSAPP_DM_POLICY"));
+        assert!(BRIDGE_MJS.contains("ANYA_WHATSAPP_GROUP_POLICY"));
+        assert!(BRIDGE_MJS.contains("ANYA_WHATSAPP_ALLOW_FROM"));
+        assert!(BRIDGE_MJS.contains("ANYA_WHATSAPP_BLOCK_FROM"));
+        assert!(BRIDGE_MJS.contains("whatsapp_message_dropped"));
     }
 }

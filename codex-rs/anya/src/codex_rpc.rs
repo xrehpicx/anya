@@ -7,6 +7,8 @@ use codex_app_server_protocol::JSONRPCMessage;
 use codex_app_server_protocol::JSONRPCRequest;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerNotification;
+use codex_app_server_protocol::ThreadResumeParams;
+use codex_app_server_protocol::ThreadResumeResponse;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::TurnStartParams;
@@ -53,6 +55,34 @@ impl CodexRpcClient {
                 model,
                 cwd,
                 ..ThreadStartParams::default()
+            },
+        })
+        .await
+    }
+
+    pub async fn thread_resume(&mut self, thread_id: String) -> Result<ThreadResumeResponse> {
+        let request_id = self.request_id();
+        self.request_typed(ClientRequest::ThreadResume {
+            request_id,
+            params: ThreadResumeParams {
+                thread_id,
+                history: None,
+                path: None,
+                model: None,
+                model_provider: None,
+                service_tier: None,
+                cwd: None,
+                runtime_workspace_roots: None,
+                approval_policy: None,
+                approvals_reviewer: None,
+                sandbox: None,
+                permissions: None,
+                config: None,
+                base_instructions: None,
+                developer_instructions: None,
+                personality: None,
+                exclude_turns: false,
+                persist_extended_history: false,
             },
         })
         .await
