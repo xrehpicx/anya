@@ -791,11 +791,11 @@ function streamAnya(args, callbacks, options = {}) {
       try {
         event = JSON.parse(line);
       } catch {
-        callbacks.onText?.(line);
+        callbacks.onMessageDelta?.(line);
         return;
       }
       if (event.type === 'message_delta') {
-        callbacks.onText?.(event.delta || '');
+        callbacks.onMessageDelta?.(event.delta || '');
       } else {
         callbacks.onActivity?.(event);
       }
@@ -1087,7 +1087,7 @@ async function streamPrompt(sock, remoteJid, message, channel, text, options = {
       '--stream-json',
       text,
     ], {
-      onText: (delta) => {
+      onMessageDelta: (delta) => {
         if (!delta) return;
         buffer += delta;
         if (shouldFlushText(buffer, delta)) flush();
