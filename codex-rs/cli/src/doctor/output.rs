@@ -27,6 +27,7 @@ const GROUPS: &[OutputGroup] = &[
         title: "Environment",
         keys: &[
             "system", "runtime", "install", "search", "git", "terminal", "title", "state",
+            "threads",
         ],
     },
     OutputGroup {
@@ -701,6 +702,7 @@ fn state_summary(check: &DoctorCheck) -> String {
         "state DB integrity",
         "log DB integrity",
         "goals DB integrity",
+        "memories DB integrity",
     ]
     .into_iter()
     .all(|label| detail::detail_value(check, label).is_some_and(|value| value == "ok"));
@@ -1338,6 +1340,59 @@ Run codex doctor without --summary for detailed diagnostics.
             "─".repeat(SEPARATOR_WIDTH)
         );
         assert_eq!(rendered, expected);
+    }
+
+    #[test]
+    fn render_human_report_includes_threads_row_in_environment() {
+        let mut report = sample_report();
+        report.checks.push(DoctorCheck::new(
+            "state.rollout_db_parity",
+            "threads",
+            CheckStatus::Warning,
+            "rollout files and state DB thread inventory differ",
+        ));
+
+        let rendered = render_human_report(&report, summary_no_color_unicode_options());
+
+        let threads_line = rendered
+            .lines()
+            .find(|line| line.contains("threads"))
+            .expect("threads row should be rendered");
+        assert!(
+            threads_line.contains("rollout files and state DB thread inventory differ"),
+            "{threads_line}"
+        );
+    }
+
+    #[test]
+    fn render_human_report_includes_memories_db_in_state_health_summary() {
+        let report = DoctorReport {
+            schema_version: 1,
+            generated_at: "0s since unix epoch".to_string(),
+            overall_status: CheckStatus::Ok,
+            codex_version: "0.0.0".to_string(),
+            checks: vec![
+                DoctorCheck::new(
+                    "state.paths",
+                    "state",
+                    CheckStatus::Ok,
+                    "state paths inspectable",
+                )
+                .detail("state DB: /tmp/state.sqlite")
+                .detail("state DB integrity: ok")
+                .detail("log DB: /tmp/logs.sqlite")
+                .detail("log DB integrity: ok")
+                .detail("goals DB: /tmp/goals.sqlite")
+                .detail("goals DB integrity: ok")
+                .detail("memories DB: /tmp/memories.sqlite")
+                .detail("memories DB integrity: ok"),
+            ],
+        };
+
+        let rendered = render_human_report(&report, detailed_no_color_unicode_options());
+
+        assert!(rendered.contains("✓ state        databases healthy"));
+        assert!(rendered.contains("memories DB              /tmp/memories.sqlite · integrity ok"));
     }
 
     #[test]
