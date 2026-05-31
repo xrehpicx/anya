@@ -605,10 +605,7 @@ const commandTimeoutMs = parseTimeout(
   process.env.ANYA_WHATSAPP_COMMAND_TIMEOUT_MS,
   30_000
 );
-const replyTimeoutMs = parseTimeout(
-  process.env.ANYA_WHATSAPP_REPLY_TIMEOUT_MS,
-  120_000
-);
+const replyTimeoutMs = parseOptionalTimeout(process.env.ANYA_WHATSAPP_REPLY_TIMEOUT_MS);
 const sessionDir =
   process.env.ANYA_WHATSAPP_SESSION_DIR ||
   join(process.env.HOME || '.', '.local', 'share', 'anya', 'whatsapp', 'session');
@@ -626,6 +623,11 @@ class AnyaRunStoppedError extends Error {
 function parseTimeout(value, fallback) {
   const parsed = Number.parseInt(value || '', 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function parseOptionalTimeout(value) {
+  const parsed = Number.parseInt(value || '', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
 function parseListEnv(value) {
@@ -722,6 +724,115 @@ function runAnya(args, options = {}) {
         return;
       }
       const detail = stderr.trim() || stdout.trim() || `anya exited with ${code ?? signal}`;
+      fail(new Error(detail));
+    });
+  });
+}
+
+function streamAnya(args, callbacks, options = {}) {
+  const activeKey = options.activeKey;
+  const timeoutMs = options.timeoutMs ?? null;
+  return new Promise((resolve, reject) => {
+    const child = spawn(anyaBinary, args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let lineBuffer = '';
+    let stderr = '';
+    let settled = false;
+    let sentSignal = false;
+    let timeout;
+    let killTimer;
+
+    const cleanup = () => {
+      clearTimeout(timeout);
+      clearTimeout(killTimer);
+      if (activeKey && activeRuns.get(activeKey)?.child === child) {
+        activeRuns.delete(activeKey);
+      }
+    };
+    const stopChild = () => {
+      if (child.exitCode !== null || sentSignal) return;
+      child.kill('SIGTERM');
+      sentSignal = true;
+      killTimer = setTimeout(() => {
+        if (child.exitCode === null) child.kill('SIGKILL');
+      }, 2_000);
+      killTimer.unref?.();
+    };
+    const settle = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      fn(value);
+    };
+    const fail = (error) => settle(reject, error);
+
+    if (timeoutMs) {
+      timeout = setTimeout(() => {
+        stopChild();
+        fail(new Error(`Anya command timed out after ${Math.round(timeoutMs / 1000)}s`));
+      }, timeoutMs);
+      timeout.unref?.();
+    }
+
+    if (activeKey) {
+      activeRuns.set(activeKey, {
+        child,
+        stop: () => {
+          stopChild();
+          fail(new AnyaRunStoppedError());
+        },
+      });
+    }
+
+    const handleLine = (line) => {
+      if (!line.trim()) return;
+      let event;
+      try {
+        event = JSON.parse(line);
+      } catch {
+        callbacks.onText?.(line);
+        return;
+      }
+      if (event.type === 'message_delta') {
+        callbacks.onText?.(event.delta || '');
+      } else {
+        callbacks.onActivity?.(event);
+      }
+    };
+
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => {
+      lineBuffer += chunk;
+      if (lineBuffer.length > 10 * 1024 * 1024) {
+        stopChild();
+        fail(new Error('Anya stream exceeded 10 MiB without a newline'));
+        return;
+      }
+      let newlineIndex;
+      while ((newlineIndex = lineBuffer.indexOf('\n')) !== -1) {
+        const line = lineBuffer.slice(0, newlineIndex);
+        lineBuffer = lineBuffer.slice(newlineIndex + 1);
+        handleLine(line);
+      }
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+      if (stderr.length > 10 * 1024 * 1024) {
+        stopChild();
+        fail(new Error('Anya stderr exceeded 10 MiB'));
+      }
+    });
+    child.on('error', fail);
+    child.on('close', (code, signal) => {
+      if (settled) return;
+      if (lineBuffer.trim()) handleLine(lineBuffer);
+      if (code === 0) {
+        settle(resolve);
+        return;
+      }
+      const detail = stderr.trim() || `anya exited with ${code ?? signal}`;
       fail(new Error(detail));
     });
   });
@@ -928,28 +1039,80 @@ async function replyText(sock, remoteJid, message, text, options = {}) {
   await sock.sendMessage(remoteJid, { text }, sendOptions);
 }
 
-function sendPrompt(channel, text) {
-  return runAnya([
-    'session-send',
-    '--endpoint',
-    endpoint,
-    '--channel',
-    channel,
-    '--wait',
-    text,
-  ], {
-    activeKey: channel,
-    timeoutMs: replyTimeoutMs,
-  });
+function shouldFlushText(buffer, delta) {
+  return (
+    buffer.length >= 900 ||
+    /\n\s*\n$/.test(buffer) ||
+    /[.!?]\s+$/.test(delta)
+  );
 }
 
-async function sendPromptWithRecovery(remoteJid, channel, text) {
+async function streamPrompt(sock, remoteJid, message, channel, text, options = {}) {
+  let buffer = '';
+  let flushTimer;
+  let sendQueue = Promise.resolve();
+  const quoted = Boolean(options.quoted);
+
+  const enqueue = (fn) => {
+    sendQueue = sendQueue.then(fn, fn);
+    return sendQueue;
+  };
+  const sendPresence = () => {
+    void sock.sendPresenceUpdate('composing', remoteJid).catch(() => {});
+  };
+  const flush = () => {
+    clearTimeout(flushTimer);
+    flushTimer = undefined;
+    const chunk = buffer.trim();
+    buffer = '';
+    if (!chunk) return;
+    enqueue(() => replyText(sock, remoteJid, message, chunk, { quoted }));
+  };
+  const scheduleFlush = () => {
+    if (flushTimer) return;
+    flushTimer = setTimeout(flush, 2_500);
+    flushTimer.unref?.();
+  };
+
+  sendPresence();
+  const presenceInterval = setInterval(sendPresence, 15_000);
+  presenceInterval.unref?.();
   try {
-    return await sendPrompt(channel, text);
+    await streamAnya([
+      'session-send',
+      '--endpoint',
+      endpoint,
+      '--channel',
+      channel,
+      '--stream-json',
+      text,
+    ], {
+      onText: (delta) => {
+        if (!delta) return;
+        buffer += delta;
+        if (shouldFlushText(buffer, delta)) flush();
+        else scheduleFlush();
+      },
+      onActivity: sendPresence,
+    }, {
+      activeKey: channel,
+      timeoutMs: replyTimeoutMs,
+    });
+    flush();
+    await sendQueue;
+  } finally {
+    clearInterval(presenceInterval);
+    clearTimeout(flushTimer);
+  }
+}
+
+async function streamPromptWithRecovery(sock, remoteJid, message, channel, text, options = {}) {
+  try {
+    await streamPrompt(sock, remoteJid, message, channel, text, options);
   } catch (error) {
     if (!isThreadNotFoundError(error)) throw error;
     await createChannelSession(remoteJid);
-    return await sendPrompt(channel, text);
+    await streamPrompt(sock, remoteJid, message, channel, text, options);
   }
 }
 
@@ -961,10 +1124,8 @@ async function handleSlashCommand(sock, remoteJid, message, command) {
       stopActiveRun(channel);
       await createChannelSession(remoteJid);
       if (command.rest) {
-        await sock.sendPresenceUpdate('composing', remoteJid);
         try {
-          const reply = (await sendPrompt(channel, command.rest)).trim();
-          if (reply) await replyText(sock, remoteJid, message, reply);
+          await streamPrompt(sock, remoteJid, message, channel, command.rest);
         } finally {
           await sock.sendPresenceUpdate('paused', remoteJid);
         }
@@ -1002,10 +1163,10 @@ async function handleSlashCommand(sock, remoteJid, message, command) {
         );
         return true;
       }
-      await sock.sendPresenceUpdate('composing', remoteJid);
       try {
-        const reply = (await sendPromptWithRecovery(remoteJid, channel, command.rest)).trim();
-        if (reply) await replyText(sock, remoteJid, message, reply, { quoted: true });
+        await streamPromptWithRecovery(sock, remoteJid, message, channel, command.rest, {
+          quoted: true,
+        });
       } finally {
         await sock.sendPresenceUpdate('paused', remoteJid);
       }
@@ -1073,11 +1234,7 @@ async function handleMessage(sock, message) {
       return;
     }
 
-    await sock.sendPresenceUpdate('composing', remoteJid);
-    const reply = (await sendPromptWithRecovery(remoteJid, channel, text)).trim();
-    if (reply) {
-      await replyText(sock, remoteJid, message, reply);
-    }
+    await streamPromptWithRecovery(sock, remoteJid, message, channel, text);
   } catch (error) {
     if (!isStoppedError(error)) {
       console.error(`Anya WhatsApp message error: ${error?.stack || error?.message || error}`);
@@ -1190,8 +1347,9 @@ mod tests {
         assert!(BRIDGE_MJS.contains("['new', 'reset', 'stop', 'status', 'help', 'reply']"));
         assert!(BRIDGE_MJS.contains("Started a new Anya session for this channel."));
         assert!(BRIDGE_MJS.contains("Stopped the active Anya reply for this channel."));
-        assert!(BRIDGE_MJS.contains("sendPromptWithRecovery"));
-        assert!(BRIDGE_MJS.contains("{ quoted: true }"));
+        assert!(BRIDGE_MJS.contains("streamPromptWithRecovery"));
+        assert!(BRIDGE_MJS.contains("--stream-json"));
+        assert!(BRIDGE_MJS.contains("{ quoted }"));
     }
 
     #[test]

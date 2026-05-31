@@ -225,6 +225,9 @@ struct SessionSendArgs {
     channel: Option<String>,
     #[arg(long)]
     wait: bool,
+    /// Stream JSON-lines turn events to stdout as the app-server emits them.
+    #[arg(long, conflicts_with = "wait")]
+    stream_json: bool,
     #[arg(required = true, trailing_var_arg = true)]
     message: Vec<String>,
 }
@@ -479,7 +482,22 @@ async fn session_send(args: SessionSendArgs) -> Result<()> {
         }
         Err(error) => return Err(error),
     }
-    if args.wait {
+    if args.stream_json {
+        match client
+            .turn_start_json_stream(thread_id.clone(), message.clone())
+            .await
+        {
+            Ok(()) => {}
+            Err(error) if channel.is_some() && is_thread_not_found_error(&error) => {
+                let channel = channel
+                    .as_deref()
+                    .context("channel is required for stale thread recovery")?;
+                let thread_id = create_default_channel_thread(&mut client, channel).await?;
+                client.turn_start_json_stream(thread_id, message).await?;
+            }
+            Err(error) => return Err(error),
+        }
+    } else if args.wait {
         let response = match client
             .turn_start_collect(thread_id.clone(), message.clone())
             .await

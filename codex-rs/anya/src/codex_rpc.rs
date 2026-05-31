@@ -27,6 +27,8 @@ use tokio_tungstenite::tungstenite::Message;
 
 type Ws = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
+const ANYA_DEVELOPER_INSTRUCTIONS: &str = r#"You are Anya, a coding agent based on Codex. When asked who you are or what your name is, identify yourself as Anya. Keep the Codex coding-agent behavior, tools, and safety model, but use the Anya name in user-facing channel conversations."#;
+
 pub struct CodexRpcClient {
     next_id: i64,
     ws: Ws,
@@ -58,6 +60,7 @@ impl CodexRpcClient {
                 cwd,
                 approval_policy: Some(AskForApproval::Never),
                 sandbox: Some(SandboxMode::DangerFullAccess),
+                developer_instructions: Some(ANYA_DEVELOPER_INSTRUCTIONS.to_string()),
                 ..ThreadStartParams::default()
             },
         })
@@ -70,23 +73,10 @@ impl CodexRpcClient {
             request_id,
             params: ThreadResumeParams {
                 thread_id,
-                history: None,
-                path: None,
-                model: None,
-                model_provider: None,
-                service_tier: None,
-                cwd: None,
-                runtime_workspace_roots: None,
                 approval_policy: Some(AskForApproval::Never),
-                approvals_reviewer: None,
                 sandbox: Some(SandboxMode::DangerFullAccess),
-                permissions: None,
-                config: None,
-                base_instructions: None,
-                developer_instructions: None,
-                personality: None,
-                exclude_turns: false,
-                persist_extended_history: false,
+                developer_instructions: Some(ANYA_DEVELOPER_INSTRUCTIONS.to_string()),
+                ..ThreadResumeParams::default()
             },
         })
         .await
@@ -118,6 +108,97 @@ impl CodexRpcClient {
         stdout.write_all(response.as_bytes())?;
         writeln!(stdout)?;
         Ok(())
+    }
+
+    pub async fn turn_start_json_stream(&mut self, thread_id: String, text: String) -> Result<()> {
+        let request_id = self.request_id();
+        let request = ClientRequest::TurnStart {
+            request_id: request_id.clone(),
+            params: TurnStartParams {
+                thread_id: thread_id.clone(),
+                input: vec![UserInput::Text {
+                    text,
+                    text_elements: Vec::new(),
+                }],
+                ..TurnStartParams::default()
+            },
+        };
+        let method = request.method();
+        let value = serde_json::to_value(request).context("serialize Codex request")?;
+        self.ws
+            .send(Message::Text(value.to_string().into()))
+            .await
+            .with_context(|| format!("send {method} request"))?;
+
+        let mut stdout = std::io::stdout().lock();
+        let mut saw_response = false;
+        let mut saw_completion = false;
+        while let Some(message) = self.ws.next().await {
+            let message = message.context("read websocket message")?;
+            let Some(rpc_message) = decode_ws_message(message)? else {
+                continue;
+            };
+
+            match rpc_message {
+                JSONRPCMessage::Response(response) if response.id == request_id => {
+                    saw_response = true;
+                    write_json_stream_event(
+                        &mut stdout,
+                        serde_json::json!({ "type": "turn_accepted" }),
+                    )?;
+                    if saw_completion {
+                        break;
+                    }
+                }
+                JSONRPCMessage::Error(error) if error.id == request_id => {
+                    anyhow::bail!(
+                        "{method} failed: {} (code {})",
+                        error.error.message,
+                        error.error.code
+                    );
+                }
+                JSONRPCMessage::Notification(notification) => {
+                    let notification = ServerNotification::try_from(notification)
+                        .context("decode server notification")?;
+                    match notification {
+                        ServerNotification::AgentMessageDelta(delta)
+                            if delta.thread_id == thread_id =>
+                        {
+                            write_json_stream_event(
+                                &mut stdout,
+                                serde_json::json!({
+                                    "type": "message_delta",
+                                    "delta": delta.delta,
+                                }),
+                            )?;
+                        }
+                        ServerNotification::TurnCompleted(done) if done.thread_id == thread_id => {
+                            saw_completion = true;
+                            write_json_stream_event(
+                                &mut stdout,
+                                serde_json::json!({ "type": "turn_completed" }),
+                            )?;
+                            if saw_response {
+                                break;
+                            }
+                        }
+                        _ => {
+                            write_json_stream_event(
+                                &mut stdout,
+                                serde_json::json!({ "type": "activity" }),
+                            )?;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if saw_response && saw_completion {
+            Ok(())
+        } else {
+            anyhow::bail!("websocket closed before turn completed")
+        }
     }
 
     pub async fn turn_start_collect(&mut self, thread_id: String, text: String) -> Result<String> {
@@ -288,6 +369,15 @@ impl CodexRpcClient {
         self.next_id += 1;
         RequestId::Integer(id)
     }
+}
+
+fn write_json_stream_event(
+    writer: &mut impl Write,
+    value: serde_json::Value,
+) -> std::io::Result<()> {
+    serde_json::to_writer(&mut *writer, &value)?;
+    writeln!(writer)?;
+    writer.flush()
 }
 
 fn decode_ws_message(message: Message) -> Result<Option<JSONRPCMessage>> {
