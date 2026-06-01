@@ -587,9 +587,9 @@ import Pino from 'pino';
 import qrcode from 'qrcode-terminal';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 const anyaBinary = process.env.ANYA_BINARY || 'anya';
 const endpoint = process.env.ANYA_ENDPOINT || 'ws://127.0.0.1:4827';
@@ -623,8 +623,12 @@ const sessionDir =
 const mediaDir =
   process.env.ANYA_WHATSAPP_MEDIA_DIR ||
   join(process.env.HOME || '.', '.local', 'share', 'anya', 'whatsapp', 'media');
+const channelSettingsPath =
+  process.env.ANYA_WHATSAPP_CHANNEL_SETTINGS_PATH ||
+  join(process.env.HOME || '.', '.local', 'share', 'anya', 'whatsapp', 'channel-settings.json');
 const maxMediaBytes = parseTimeout(process.env.ANYA_WHATSAPP_MAX_MEDIA_BYTES, 25 * 1024 * 1024);
 const activeRuns = new Map();
+let channelSettings = loadChannelSettings();
 
 mkdirSync(sessionDir, { recursive: true });
 mkdirSync(mediaDir, { recursive: true });
@@ -661,6 +665,52 @@ function parseBoolEnv(value, fallback) {
 function normalizePolicy(value, fallback) {
   const normalized = String(value || fallback).trim().toLowerCase();
   return ['open', 'allowlist', 'disabled'].includes(normalized) ? normalized : fallback;
+}
+
+function loadChannelSettings() {
+  try {
+    return JSON.parse(readFileSync(channelSettingsPath, 'utf8'));
+  } catch {
+    return {};
+  }
+}
+
+function saveChannelSettings() {
+  mkdirSync(dirname(channelSettingsPath), { recursive: true });
+  writeFileSync(channelSettingsPath, JSON.stringify(channelSettings, null, 2));
+}
+
+function settingsForChannel(channel) {
+  const settings = channelSettings[channel];
+  return settings && typeof settings === 'object' ? settings : {};
+}
+
+function updateChannelSettings(channel, patch) {
+  const next = {
+    ...settingsForChannel(channel),
+    ...patch,
+  };
+  for (const key of Object.keys(next)) {
+    if (next[key] === null || next[key] === undefined || next[key] === '') delete next[key];
+  }
+  if (Object.keys(next).length === 0) delete channelSettings[channel];
+  else channelSettings[channel] = next;
+  saveChannelSettings();
+  return settingsForChannel(channel);
+}
+
+function normalizeReasoningEffort(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (['default', 'unset', 'clear'].includes(normalized)) return null;
+  if (['none', 'minimal', 'low', 'medium', 'high', 'xhigh'].includes(normalized)) {
+    return normalized;
+  }
+  throw new Error('Reasoning effort must be one of: none, minimal, low, medium, high, xhigh, default.');
+}
+
+function describeChannelSettings(channel) {
+  const settings = settingsForChannel(channel);
+  return `Model: ${settings.model || 'default'}. Thinking: ${settings.effort || 'default'}.`;
 }
 
 function runProcess(command, args, options = {}) {
@@ -1320,7 +1370,7 @@ function parseSlashCommand(text) {
 }
 
 function isChannelSlashCommand(command) {
-  return ['new', 'reset', 'stop', 'status', 'help', 'reply'].includes(command?.name);
+  return ['new', 'reset', 'stop', 'status', 'help', 'reply', 'model', 'effort', 'thinking', 'settings'].includes(command?.name);
 }
 
 function stopActiveRun(channel) {
@@ -1377,6 +1427,10 @@ async function streamPrompt(sock, remoteJid, message, channel, text, options = {
   let sendQueue = Promise.resolve();
   const quoted = Boolean(options.quoted);
   const images = options.images || [];
+  const settings = {
+    ...settingsForChannel(channel),
+    ...(options.settings || {}),
+  };
 
   const enqueue = (fn) => {
     sendQueue = sendQueue.then(fn, fn);
@@ -1414,6 +1468,8 @@ async function streamPrompt(sock, remoteJid, message, channel, text, options = {
     for (const image of images) {
       args.push('--image', image);
     }
+    if (settings.model) args.push('--model', settings.model);
+    if (settings.effort) args.push('--effort', settings.effort);
     args.push(text);
     await streamAnya(args, {
       onMessageDelta: (delta) => {
@@ -1521,9 +1577,45 @@ async function handleSlashCommand(sock, remoteJid, message, command) {
         sock,
         remoteJid,
         message,
-        `Anya is connected. Channel: ${channel}. Active reply: ${activeRuns.has(channel) ? 'yes' : 'no'}.`
+        `Anya is connected. Channel: ${channel}. Active reply: ${activeRuns.has(channel) ? 'yes' : 'no'}. ${describeChannelSettings(channel)}`
       );
       return true;
+    case 'settings':
+      await replyText(sock, remoteJid, message, describeChannelSettings(channel));
+      return true;
+    case 'model': {
+      const value = command.rest.trim();
+      if (!value) {
+        await replyText(
+          sock,
+          remoteJid,
+          message,
+          `${describeChannelSettings(channel)} Usage: /model <model-id|default>`
+        );
+        return true;
+      }
+      const model = ['default', 'unset', 'clear'].includes(value.toLowerCase()) ? null : value;
+      updateChannelSettings(channel, { model });
+      await replyText(sock, remoteJid, message, `Updated. ${describeChannelSettings(channel)}`);
+      return true;
+    }
+    case 'effort':
+    case 'thinking': {
+      const value = command.rest.trim();
+      if (!value) {
+        await replyText(
+          sock,
+          remoteJid,
+          message,
+          `${describeChannelSettings(channel)} Usage: /thinking <none|minimal|low|medium|high|xhigh|default>`
+        );
+        return true;
+      }
+      const effort = normalizeReasoningEffort(value);
+      updateChannelSettings(channel, { effort });
+      await replyText(sock, remoteJid, message, `Updated. ${describeChannelSettings(channel)}`);
+      return true;
+    }
     case 'reply':
       if (!command.rest) {
         await replyText(sock, remoteJid, message, 'Usage: /reply <message>');
@@ -1547,7 +1639,7 @@ async function handleSlashCommand(sock, remoteJid, message, command) {
         sock,
         remoteJid,
         message,
-        'Anya commands: /new, /reset, /stop, /status, /reply, /help. In groups, mention anya or start with /anya or /ask to chat.'
+        'Anya commands: /new, /reset, /stop, /status, /model, /thinking, /settings, /reply, /help. In groups, mention anya or start with /anya or /ask to chat.'
       );
       return true;
   }
@@ -1715,7 +1807,8 @@ mod tests {
     #[test]
     fn whatsapp_bridge_handles_channel_slash_commands() {
         assert!(BRIDGE_MJS.contains("parseSlashCommand"));
-        assert!(BRIDGE_MJS.contains("['new', 'reset', 'stop', 'status', 'help', 'reply']"));
+        assert!(BRIDGE_MJS.contains("'model'"));
+        assert!(BRIDGE_MJS.contains("'thinking'"));
         assert!(BRIDGE_MJS.contains("Started a new Anya session for this channel."));
         assert!(BRIDGE_MJS.contains("Stopped the active Anya reply for this channel."));
         assert!(BRIDGE_MJS.contains("streamPromptWithRecovery"));
@@ -1764,5 +1857,18 @@ mod tests {
         assert!(BRIDGE_MJS.contains("waitForActiveTurnId"));
         assert!(BRIDGE_MJS.contains("steerActiveRunInBackground"));
         assert!(!BRIDGE_MJS.contains("Anya is already replying in this channel"));
+    }
+
+    #[test]
+    fn whatsapp_bridge_supports_channel_model_settings() {
+        assert!(BRIDGE_MJS.contains("ANYA_WHATSAPP_CHANNEL_SETTINGS_PATH"));
+        assert!(BRIDGE_MJS.contains("channel-settings.json"));
+        assert!(BRIDGE_MJS.contains("function normalizeReasoningEffort"));
+        assert!(BRIDGE_MJS.contains("args.push('--model', settings.model)"));
+        assert!(BRIDGE_MJS.contains("args.push('--effort', settings.effort)"));
+        assert!(BRIDGE_MJS.contains("Usage: /model <model-id|default>"));
+        assert!(
+            BRIDGE_MJS.contains("Usage: /thinking <none|minimal|low|medium|high|xhigh|default>")
+        );
     }
 }

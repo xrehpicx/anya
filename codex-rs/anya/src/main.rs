@@ -25,6 +25,7 @@ use codex_cli::run_login_with_chatgpt;
 use codex_cli::run_login_with_device_code;
 use codex_cli::run_logout;
 use codex_config::LoaderOverrides;
+use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::SessionSource;
 use codex_tui::AppExitInfo;
 use codex_tui::Cli as CodexTuiCli;
@@ -39,6 +40,10 @@ use crate::channel::ChannelStore;
 use crate::codex_rpc::CodexRpcClient;
 
 const CHANNEL_SLASH_HELP: &str = "Anya commands: /new, /reset, /stop, /status, /help.";
+
+fn parse_reasoning_effort(value: &str) -> std::result::Result<ReasoningEffort, String> {
+    value.parse()
+}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -241,6 +246,12 @@ struct SessionSendArgs {
     /// Attach one or more local image files to this turn.
     #[arg(long = "image", value_name = "PATH")]
     images: Vec<PathBuf>,
+    /// Override the model for this turn and subsequent turns in the session.
+    #[arg(long)]
+    model: Option<String>,
+    /// Override reasoning effort for this turn and subsequent turns.
+    #[arg(long, value_parser = parse_reasoning_effort)]
+    effort: Option<ReasoningEffort>,
     #[arg(required = true, trailing_var_arg = true)]
     message: Vec<String>,
 }
@@ -373,7 +384,7 @@ async fn auth_status(args: AuthStatusArgs) -> Result<()> {
     let probe = "Reply exactly: auth-ok".to_string();
     let result = tokio::time::timeout(
         timeout_duration,
-        client.turn_start_collect(thread_id, probe, Vec::new()),
+        client.turn_start_collect(thread_id, probe, Vec::new(), None, None),
     )
     .await;
     match result {
@@ -489,6 +500,8 @@ async fn session_create(args: SessionCreateArgs) -> Result<()> {
 async fn session_send(args: SessionSendArgs) -> Result<()> {
     let message = args.message.join(" ");
     let images = args.images.clone();
+    let model = args.model.clone();
+    let effort = args.effort;
     if let (Some(channel), Some(command)) =
         (args.channel.clone(), parse_channel_slash_command(&message))
     {
@@ -519,7 +532,13 @@ async fn session_send(args: SessionSendArgs) -> Result<()> {
     }
     if args.stream_json {
         match client
-            .turn_start_json_stream(thread_id.clone(), message.clone(), images.clone())
+            .turn_start_json_stream(
+                thread_id.clone(),
+                message.clone(),
+                images.clone(),
+                model.clone(),
+                effort,
+            )
             .await
         {
             Ok(()) => {}
@@ -529,14 +548,20 @@ async fn session_send(args: SessionSendArgs) -> Result<()> {
                     .context("channel is required for stale thread recovery")?;
                 let thread_id = create_default_channel_thread(&mut client, channel).await?;
                 client
-                    .turn_start_json_stream(thread_id, message, images)
+                    .turn_start_json_stream(thread_id, message, images, model, effort)
                     .await?;
             }
             Err(error) => return Err(error),
         }
     } else if args.wait {
         let response = match client
-            .turn_start_collect(thread_id.clone(), message.clone(), images.clone())
+            .turn_start_collect(
+                thread_id.clone(),
+                message.clone(),
+                images.clone(),
+                model.clone(),
+                effort,
+            )
             .await
         {
             Ok(response) => response,
@@ -546,7 +571,7 @@ async fn session_send(args: SessionSendArgs) -> Result<()> {
                     .context("channel is required for stale thread recovery")?;
                 let thread_id = create_default_channel_thread(&mut client, channel).await?;
                 client
-                    .turn_start_collect(thread_id, message, images)
+                    .turn_start_collect(thread_id, message, images, model, effort)
                     .await?
             }
             Err(error) => return Err(error),
@@ -554,7 +579,13 @@ async fn session_send(args: SessionSendArgs) -> Result<()> {
         println!("{response}");
     } else {
         let response = match client
-            .turn_start(thread_id.clone(), message.clone(), images.clone())
+            .turn_start(
+                thread_id.clone(),
+                message.clone(),
+                images.clone(),
+                model.clone(),
+                effort,
+            )
             .await
         {
             Ok(response) => response,
@@ -563,7 +594,9 @@ async fn session_send(args: SessionSendArgs) -> Result<()> {
                     .as_deref()
                     .context("channel is required for stale thread recovery")?;
                 let thread_id = create_default_channel_thread(&mut client, channel).await?;
-                client.turn_start(thread_id, message, images).await?
+                client
+                    .turn_start(thread_id, message, images, model, effort)
+                    .await?
             }
             Err(error) => return Err(error),
         };
@@ -608,11 +641,13 @@ async fn session_send_slash_command(
                 println!("Started a new Anya session for this channel.");
             } else if wait {
                 let response = client
-                    .turn_start_collect(thread_id, rest, Vec::new())
+                    .turn_start_collect(thread_id, rest, Vec::new(), None, None)
                     .await?;
                 println!("{response}");
             } else {
-                let response = client.turn_start(thread_id, rest, Vec::new()).await?;
+                let response = client
+                    .turn_start(thread_id, rest, Vec::new(), None, None)
+                    .await?;
                 serde_json::to_writer_pretty(std::io::stdout(), &response)?;
                 println!();
             }

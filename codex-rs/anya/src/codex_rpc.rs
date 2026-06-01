@@ -19,6 +19,7 @@ use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::TurnSteerParams;
 use codex_app_server_protocol::TurnSteerResponse;
 use codex_app_server_protocol::UserInput;
+use codex_protocol::openai_models::ReasoningEffort;
 use futures::SinkExt;
 use futures::StreamExt;
 use serde::de::DeserializeOwned;
@@ -92,6 +93,8 @@ impl CodexRpcClient {
         thread_id: String,
         text: String,
         images: Vec<PathBuf>,
+        model: Option<String>,
+        effort: Option<ReasoningEffort>,
     ) -> Result<TurnStartResponse> {
         let request_id = self.request_id();
         self.request_typed(ClientRequest::TurnStart {
@@ -99,6 +102,8 @@ impl CodexRpcClient {
             params: TurnStartParams {
                 thread_id,
                 input: turn_input(text, images),
+                model,
+                effort,
                 ..TurnStartParams::default()
             },
         })
@@ -131,7 +136,9 @@ impl CodexRpcClient {
         text: String,
         images: Vec<PathBuf>,
     ) -> Result<()> {
-        let response = self.turn_start_collect(thread_id, text, images).await?;
+        let response = self
+            .turn_start_collect(thread_id, text, images, None, None)
+            .await?;
         let mut stdout = std::io::stdout().lock();
         stdout.write_all(response.as_bytes())?;
         writeln!(stdout)?;
@@ -143,6 +150,8 @@ impl CodexRpcClient {
         thread_id: String,
         text: String,
         images: Vec<PathBuf>,
+        model: Option<String>,
+        effort: Option<ReasoningEffort>,
     ) -> Result<()> {
         let request_id = self.request_id();
         let request = ClientRequest::TurnStart {
@@ -150,6 +159,8 @@ impl CodexRpcClient {
             params: TurnStartParams {
                 thread_id: thread_id.clone(),
                 input: turn_input(text, images),
+                model,
+                effort,
                 ..TurnStartParams::default()
             },
         };
@@ -241,6 +252,8 @@ impl CodexRpcClient {
         thread_id: String,
         text: String,
         images: Vec<PathBuf>,
+        model: Option<String>,
+        effort: Option<ReasoningEffort>,
     ) -> Result<String> {
         let request_id = self.request_id();
         let request = ClientRequest::TurnStart {
@@ -248,6 +261,8 @@ impl CodexRpcClient {
             params: TurnStartParams {
                 thread_id: thread_id.clone(),
                 input: turn_input(text, images),
+                model,
+                effort,
                 ..TurnStartParams::default()
             },
         };
