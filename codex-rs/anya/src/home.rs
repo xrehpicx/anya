@@ -32,7 +32,9 @@ fn seed_anya_system_skills(anya_home: &Path) -> Result<()> {
     std::fs::create_dir_all(&skill_dir)
         .with_context(|| format!("create Anya skill dir {}", skill_dir.display()))?;
     let skill_path = skill_dir.join("SKILL.md");
-    if skill_path.exists() {
+    if skill_path.exists()
+        && std::fs::read_to_string(&skill_path).ok().as_deref() == Some(ANYA_WHATSAPP_SKILL)
+    {
         return Ok(());
     }
     std::fs::write(&skill_path, ANYA_WHATSAPP_SKILL)
@@ -109,7 +111,7 @@ fn copy_dir_if_missing(source: &Path, destination: &Path) -> Result<()> {
 
 const ANYA_WHATSAPP_SKILL: &str = r#"---
 name: anya-whatsapp
-description: Use when Anya needs to operate its linked WhatsApp account directly: search known chats or contacts, read recent messages with a person or group, send outbound WhatsApp messages to phone numbers/JIDs/known names, or temporarily listen for replies after Anya initiates a conversation.
+description: "Use when Anya needs to operate its linked WhatsApp account directly: search known chats or contacts, read recent messages with a person or group, send outbound WhatsApp messages to phone numbers/JIDs/known names, or temporarily listen for replies after Anya initiates a conversation."
 metadata:
   short-description: Send and read WhatsApp from Anya
 ---

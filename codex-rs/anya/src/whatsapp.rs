@@ -1160,14 +1160,24 @@ function rememberContact(jid, patch = {}) {
   if (!jid) return;
   const current = knownContacts.get(jid) || { jid };
   const name = patch.name || patch.notify || patch.verifiedName || current.name || jid;
-  knownContacts.set(jid, { ...current, ...patch, jid, name });
+  knownContacts.set(jid, {
+    jid,
+    name,
+    notify: patch.notify || current.notify || null,
+    verifiedName: patch.verifiedName || current.verifiedName || null,
+  });
 }
 
 function rememberChat(jid, patch = {}) {
   if (!jid) return;
   const current = knownChats.get(jid) || { jid };
   const name = patch.name || patch.subject || patch.notify || current.name || displayNameForJid(jid);
-  knownChats.set(jid, { ...current, ...patch, jid, name });
+  knownChats.set(jid, {
+    jid,
+    name,
+    subject: patch.subject || current.subject || null,
+    lastMessageAt: patch.lastMessageAt || patch.conversationTimestamp || current.lastMessageAt || null,
+  });
 }
 
 function allKnownPeers() {
