@@ -14,6 +14,7 @@ pub fn ensure_anya_home() -> Result<PathBuf> {
     std::fs::create_dir_all(&anya_home)
         .with_context(|| format!("create Anya home {}", anya_home.display()))?;
     migrate_legacy_codex_home(&anya_home)?;
+    seed_anya_system_skills(&anya_home)?;
 
     // SAFETY: this runs at process startup before Anya enters the async runtime
     // and before it spawns worker threads. The embedded Codex crates read
@@ -24,6 +25,18 @@ pub fn ensure_anya_home() -> Result<PathBuf> {
     }
 
     Ok(anya_home)
+}
+
+fn seed_anya_system_skills(anya_home: &Path) -> Result<()> {
+    let skill_dir = anya_home.join("skills").join("anya-whatsapp");
+    std::fs::create_dir_all(&skill_dir)
+        .with_context(|| format!("create Anya skill dir {}", skill_dir.display()))?;
+    let skill_path = skill_dir.join("SKILL.md");
+    if skill_path.exists() {
+        return Ok(());
+    }
+    std::fs::write(&skill_path, ANYA_WHATSAPP_SKILL)
+        .with_context(|| format!("write {}", skill_path.display()))
 }
 
 fn anya_home_path() -> Result<PathBuf> {
@@ -93,3 +106,35 @@ fn copy_dir_if_missing(source: &Path, destination: &Path) -> Result<()> {
     }
     Ok(())
 }
+
+const ANYA_WHATSAPP_SKILL: &str = r#"---
+name: anya-whatsapp
+description: Use when Anya needs to operate its linked WhatsApp account directly: search known chats or contacts, read recent messages with a person or group, send outbound WhatsApp messages to phone numbers/JIDs/known names, or temporarily listen for replies after Anya initiates a conversation.
+metadata:
+  short-description: Send and read WhatsApp from Anya
+---
+
+# Anya WhatsApp
+
+Use the `anya whatsapp` CLI. These commands talk to the already-running Anya gateway WhatsApp bridge; they do not start a second WhatsApp session.
+
+## Commands
+
+- List known peers: `anya whatsapp contacts --query "<name-or-number>"`
+- Read recent recorded messages: `anya whatsapp read --chat "<name-number-or-jid>" --limit 20`
+- Send a message: `anya whatsapp send --to "<number-or-jid-or-known-name>" "message text"`
+- Send and temporarily accept replies from that peer: `anya whatsapp send --to "<peer>" --listen-secs 1800 "message text"`
+- Open a temporary listen window without sending: `anya whatsapp listen --chat "<peer>" --seconds 900`
+
+## Workflow
+
+1. Resolve the recipient first with `contacts` when the user gives a name. If there are ambiguous matches, ask the user which one to use.
+2. Use phone numbers in E.164 form when possible, for example `+15551234567`. The bridge normalizes numbers to WhatsApp JIDs.
+3. Before sending sensitive or surprising messages, confirm the exact recipient and text with the user.
+4. When the user asks whether someone replied, call `read` for that chat. The read command returns the bridge's recent recorded messages, including messages received while the gateway was running and outbound messages sent through this skill.
+5. If Anya initiates a conversation and expects a reply, use `--listen-secs` on `send` or call `listen`. This temporarily admits inbound messages from that peer even when normal inbound policy would not.
+
+## Limits
+
+The bridge can read the recent message log it recorded while connected. It is not a full phone backup extractor and may not have old WhatsApp history from before Anya's bridge observed or sent messages.
+"#;

@@ -1,4 +1,6 @@
 #[cfg(unix)]
+use std::os::unix::net::UnixStream;
+#[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -35,6 +37,14 @@ enum WhatsappCommand {
     Bridge(WhatsappBridgeArgs),
     /// Print or update WhatsApp channel access config.
     Config(WhatsappConfigArgs),
+    /// Send an outbound WhatsApp message through the running bridge.
+    Send(WhatsappSendArgs),
+    /// List known WhatsApp chats and contacts from the running bridge.
+    Contacts(WhatsappContactsArgs),
+    /// Read recent recorded messages for a WhatsApp chat.
+    Read(WhatsappReadArgs),
+    /// Temporarily allow/listen for inbound messages from a WhatsApp chat.
+    Listen(WhatsappListenArgs),
 }
 
 #[derive(Debug, Args)]
@@ -148,6 +158,44 @@ struct WhatsappConfigSetArgs {
     require_mention: Option<bool>,
 }
 
+#[derive(Debug, Args)]
+struct WhatsappSendArgs {
+    /// Phone number, WhatsApp JID, or known contact/chat name.
+    #[arg(long)]
+    to: String,
+    /// Keep inbound handling open for this peer after sending.
+    #[arg(long, default_value_t = 0)]
+    listen_secs: u64,
+    /// Message text to send.
+    #[arg(required = true, trailing_var_arg = true)]
+    message: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+struct WhatsappContactsArgs {
+    /// Optional case-insensitive name/JID/number filter.
+    #[arg(long)]
+    query: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct WhatsappReadArgs {
+    /// Phone number, WhatsApp JID, or known contact/chat name.
+    #[arg(long)]
+    chat: String,
+    #[arg(long, default_value_t = 20)]
+    limit: u32,
+}
+
+#[derive(Debug, Args)]
+struct WhatsappListenArgs {
+    /// Phone number, WhatsApp JID, or known contact/chat name.
+    #[arg(long)]
+    chat: String,
+    #[arg(long, default_value_t = 300)]
+    seconds: u64,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct WhatsappBridgeConfig {
     endpoint: String,
@@ -176,6 +224,10 @@ pub async fn run(args: WhatsappArgs) -> Result<()> {
         WhatsappCommand::Install(args) => install(args).await,
         WhatsappCommand::Bridge(args) => bridge(args).await,
         WhatsappCommand::Config(args) => config(args).await,
+        WhatsappCommand::Send(args) => whatsapp_send(args).await,
+        WhatsappCommand::Contacts(args) => whatsapp_contacts(args).await,
+        WhatsappCommand::Read(args) => whatsapp_read(args).await,
+        WhatsappCommand::Listen(args) => whatsapp_listen(args).await,
     }
 }
 
@@ -413,6 +465,7 @@ fn bridge_command(
         .env("ANYA_CHANNEL_PREFIX", &config.channel_prefix)
         .env("ANYA_BOT_NAME", &config.bot_name)
         .env("ANYA_WHATSAPP_SESSION_DIR", dir.join("session"))
+        .env("ANYA_WHATSAPP_CONTROL_SOCKET", control_socket_path(dir))
         .env("ANYA_WHATSAPP_DM_POLICY", &config.dm_policy)
         .env("ANYA_WHATSAPP_GROUP_POLICY", &config.group_policy)
         .env("ANYA_WHATSAPP_ALLOW_FROM", config.allow_from.join(","))
@@ -553,6 +606,98 @@ fn config_path(dir: &std::path::Path) -> PathBuf {
     dir.join("config.json")
 }
 
+fn control_socket_path(dir: &std::path::Path) -> PathBuf {
+    dir.join("control.sock")
+}
+
+async fn whatsapp_send(args: WhatsappSendArgs) -> Result<()> {
+    if args.message.is_empty() {
+        anyhow::bail!("message must not be empty");
+    }
+    let response = whatsapp_control_request(serde_json::json!({
+        "action": "send",
+        "to": args.to,
+        "text": args.message.join(" "),
+        "listenSecs": args.listen_secs,
+    }))?;
+    print_control_response(response)
+}
+
+async fn whatsapp_contacts(args: WhatsappContactsArgs) -> Result<()> {
+    let response = whatsapp_control_request(serde_json::json!({
+        "action": "contacts",
+        "query": args.query,
+    }))?;
+    print_control_response(response)
+}
+
+async fn whatsapp_read(args: WhatsappReadArgs) -> Result<()> {
+    let response = whatsapp_control_request(serde_json::json!({
+        "action": "read",
+        "chat": args.chat,
+        "limit": args.limit,
+    }))?;
+    print_control_response(response)
+}
+
+async fn whatsapp_listen(args: WhatsappListenArgs) -> Result<()> {
+    let response = whatsapp_control_request(serde_json::json!({
+        "action": "listen",
+        "chat": args.chat,
+        "seconds": args.seconds,
+    }))?;
+    print_control_response(response)
+}
+
+fn whatsapp_control_request(request: serde_json::Value) -> Result<serde_json::Value> {
+    #[cfg(not(unix))]
+    {
+        let _ = request;
+        anyhow::bail!("WhatsApp control commands require Unix domain sockets");
+    }
+    #[cfg(unix)]
+    {
+        use std::io::BufRead as _;
+        use std::io::Write as _;
+
+        let dir = bridge_dir(None)?;
+        let socket_path = control_socket_path(&dir);
+        let mut stream = UnixStream::connect(&socket_path).with_context(|| {
+            format!(
+                "connect to WhatsApp bridge control socket {}",
+                socket_path.display()
+            )
+        })?;
+        writeln!(stream, "{request}").context("write WhatsApp control request")?;
+        let mut reader = std::io::BufReader::new(stream);
+        let mut line = String::new();
+        reader
+            .read_line(&mut line)
+            .context("read WhatsApp control response")?;
+        let response: serde_json::Value =
+            serde_json::from_str(&line).context("parse WhatsApp control response")?;
+        if response
+            .get("ok")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
+            Ok(response)
+        } else {
+            let message = response
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("WhatsApp bridge control request failed");
+            anyhow::bail!("{message}");
+        }
+    }
+}
+
+fn print_control_response(response: serde_json::Value) -> Result<()> {
+    serde_json::to_writer_pretty(std::io::stdout(), &response)?;
+    println!();
+    Ok(())
+}
+
 async fn read_config(dir: &std::path::Path) -> Result<WhatsappBridgeConfig> {
     let path = config_path(dir);
     let contents = tokio::fs::read_to_string(&path)
@@ -587,7 +732,8 @@ import Pino from 'pino';
 import qrcode from 'qrcode-terminal';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -626,12 +772,24 @@ const mediaDir =
 const channelSettingsPath =
   process.env.ANYA_WHATSAPP_CHANNEL_SETTINGS_PATH ||
   join(process.env.HOME || '.', '.local', 'share', 'anya', 'whatsapp', 'channel-settings.json');
+const controlSocketPath =
+  process.env.ANYA_WHATSAPP_CONTROL_SOCKET ||
+  join(process.env.HOME || '.', '.local', 'share', 'anya', 'whatsapp', 'control.sock');
+const messageLogPath =
+  process.env.ANYA_WHATSAPP_MESSAGE_LOG_PATH ||
+  join(process.env.HOME || '.', '.local', 'share', 'anya', 'whatsapp', 'message-log.json');
 const maxMediaBytes = parseTimeout(process.env.ANYA_WHATSAPP_MAX_MEDIA_BYTES, 25 * 1024 * 1024);
 const activeRuns = new Map();
+const knownContacts = new Map();
+const knownChats = new Map();
+const temporaryInboundAllows = new Map();
 let channelSettings = loadChannelSettings();
+let messageLog = loadMessageLog();
 
 mkdirSync(sessionDir, { recursive: true });
 mkdirSync(mediaDir, { recursive: true });
+mkdirSync(dirname(controlSocketPath), { recursive: true });
+mkdirSync(dirname(messageLogPath), { recursive: true });
 
 class AnyaRunStoppedError extends Error {
   constructor() {
@@ -673,6 +831,20 @@ function loadChannelSettings() {
   } catch {
     return {};
   }
+}
+
+function loadMessageLog() {
+  try {
+    const parsed = JSON.parse(readFileSync(messageLogPath, 'utf8'));
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveMessageLog() {
+  mkdirSync(dirname(messageLogPath), { recursive: true });
+  writeFileSync(messageLogPath, JSON.stringify(messageLog, null, 2));
 }
 
 function saveChannelSettings() {
@@ -970,6 +1142,160 @@ function streamAnya(args, callbacks, options = {}) {
 
 function channelName(remoteJid) {
   return `${channelPrefix}:${remoteJid}`;
+}
+
+function displayNameForJid(jid) {
+  return knownContacts.get(jid)?.name || knownChats.get(jid)?.name || jid;
+}
+
+function normalizeWhatsappJid(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  if (raw.includes('@')) return raw.toLowerCase();
+  const digits = raw.replace(/\D/g, '');
+  return digits ? `${digits}@s.whatsapp.net` : '';
+}
+
+function rememberContact(jid, patch = {}) {
+  if (!jid) return;
+  const current = knownContacts.get(jid) || { jid };
+  const name = patch.name || patch.notify || patch.verifiedName || current.name || jid;
+  knownContacts.set(jid, { ...current, ...patch, jid, name });
+}
+
+function rememberChat(jid, patch = {}) {
+  if (!jid) return;
+  const current = knownChats.get(jid) || { jid };
+  const name = patch.name || patch.subject || patch.notify || current.name || displayNameForJid(jid);
+  knownChats.set(jid, { ...current, ...patch, jid, name });
+}
+
+function allKnownPeers() {
+  const peers = new Map();
+  for (const [jid, contact] of knownContacts) peers.set(jid, { ...contact, jid, source: 'contact' });
+  for (const [jid, chat] of knownChats) {
+    peers.set(jid, { ...peers.get(jid), ...chat, jid, source: peers.has(jid) ? 'contact+chat' : 'chat' });
+  }
+  for (const [jid, messages] of Object.entries(messageLog)) {
+    const latest = Array.isArray(messages) ? messages[messages.length - 1] : null;
+    peers.set(jid, {
+      ...peers.get(jid),
+      jid,
+      name: peers.get(jid)?.name || latest?.name || jid,
+      lastMessageAt: latest?.timestamp || peers.get(jid)?.lastMessageAt || null,
+      source: peers.has(jid) ? peers.get(jid).source : 'message-log',
+    });
+  }
+  return [...peers.values()];
+}
+
+function resolvePeer(value) {
+  const raw = String(value || '').trim();
+  if (!raw) throw new Error('missing WhatsApp peer');
+  const direct = normalizeWhatsappJid(raw);
+  if (direct) return direct;
+  const query = raw.toLowerCase();
+  const matches = allKnownPeers().filter((peer) => {
+    return [peer.jid, peer.name, peer.notify, peer.verifiedName, peer.subject]
+      .filter(Boolean)
+      .some((candidate) => String(candidate).toLowerCase().includes(query));
+  });
+  if (matches.length === 1) return matches[0].jid;
+  if (matches.length > 1) {
+    throw new Error(`ambiguous WhatsApp peer ${raw}: ${matches.slice(0, 6).map((peer) => `${peer.name || peer.jid} <${peer.jid}>`).join(', ')}`);
+  }
+  throw new Error(`unknown WhatsApp peer ${raw}; use a phone number, JID, or run anya whatsapp contacts`);
+}
+
+function compactMessage(message) {
+  const remoteJid = message?.key?.remoteJid;
+  if (!remoteJid) return null;
+  const fromMe = Boolean(message?.key?.fromMe);
+  const text = extractText(message);
+  const timestamp = Number(message?.messageTimestamp || 0) || Math.floor(Date.now() / 1000);
+  return {
+    id: message?.key?.id || null,
+    jid: remoteJid,
+    name: displayNameForJid(remoteJid),
+    fromMe,
+    participant: message?.key?.participant || null,
+    timestamp,
+    text,
+    hasMedia: Boolean(mediaInfo(message)),
+  };
+}
+
+function recordMessage(message) {
+  const entry = compactMessage(message);
+  if (!entry) return;
+  rememberChat(entry.jid, { name: entry.name, lastMessageAt: entry.timestamp });
+  const list = Array.isArray(messageLog[entry.jid]) ? messageLog[entry.jid] : [];
+  if (entry.id && list.some((existing) => existing.id === entry.id)) return;
+  list.push(entry);
+  messageLog[entry.jid] = list.slice(-100);
+  saveMessageLog();
+}
+
+function openTemporaryInbound(jid, seconds) {
+  const parsed = Number.parseInt(seconds || 0, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  const expiresAt = Date.now() + parsed * 1000;
+  temporaryInboundAllows.set(jid, expiresAt);
+  return new Date(expiresAt).toISOString();
+}
+
+function hasTemporaryInboundAllow(remoteJid) {
+  const expiresAt = temporaryInboundAllows.get(remoteJid);
+  if (!expiresAt) return false;
+  if (expiresAt <= Date.now()) {
+    temporaryInboundAllows.delete(remoteJid);
+    return false;
+  }
+  return true;
+}
+
+async function sendOutboundMessage(sock, to, text, listenSecs = 0) {
+  const jid = resolvePeer(to);
+  if (!text.trim()) throw new Error('message text must not be empty');
+  const result = await sock.sendMessage(jid, { text });
+  rememberChat(jid, { lastMessageAt: Math.floor(Date.now() / 1000) });
+  const entry = {
+    id: result?.key?.id || null,
+    jid,
+    name: displayNameForJid(jid),
+    fromMe: true,
+    participant: null,
+    timestamp: Math.floor(Date.now() / 1000),
+    text,
+    hasMedia: false,
+  };
+  const list = Array.isArray(messageLog[jid]) ? messageLog[jid] : [];
+  list.push(entry);
+  messageLog[jid] = list.slice(-100);
+  saveMessageLog();
+  const listeningUntil = openTemporaryInbound(jid, listenSecs);
+  return { jid, messageId: entry.id, listeningUntil };
+}
+
+function readRecordedMessages(chat, limit) {
+  const jid = resolvePeer(chat);
+  const count = Math.max(1, Math.min(Number.parseInt(limit || 20, 10) || 20, 100));
+  return {
+    jid,
+    messages: (messageLog[jid] || []).slice(-count),
+  };
+}
+
+function listKnownContacts(query) {
+  const normalized = String(query || '').trim().toLowerCase();
+  return allKnownPeers()
+    .filter((peer) => {
+      if (!normalized) return true;
+      return [peer.jid, peer.name, peer.notify, peer.verifiedName, peer.subject]
+        .filter(Boolean)
+        .some((candidate) => String(candidate).toLowerCase().includes(normalized));
+    })
+    .slice(0, 100);
 }
 
 async function createChannelSession(remoteJid) {
@@ -1283,6 +1609,9 @@ function listMatches(ids, list) {
 }
 
 function isAllowedInbound(message, remoteJid) {
+  if (hasTemporaryInboundAllow(remoteJid)) {
+    return { allowed: true, reason: 'temporary outbound listen window' };
+  }
   const ids = accessIdsForMessage(message, remoteJid);
   if (listMatches(ids, blockFrom)) {
     return { allowed: false, reason: 'sender blocked by blockFrom' };
@@ -1659,6 +1988,7 @@ async function handleMessage(sock, message) {
   if (message.key.fromMe) return;
   const remoteJid = message.key.remoteJid;
   if (!remoteJid || remoteJid === 'status@broadcast' || remoteJid.endsWith('@newsletter')) return;
+  recordMessage(message);
 
   const rawText = extractText(message);
   const command = parseSlashCommand(rawText);
@@ -1747,6 +2077,28 @@ async function start() {
   }
 
   sock.ev.on('creds.update', saveCreds);
+  sock.ev.on('contacts.update', (contacts) => {
+    for (const contact of contacts || []) {
+      rememberContact(contact.id, contact);
+    }
+  });
+  sock.ev.on('chats.update', (chats) => {
+    for (const chat of chats || []) {
+      rememberChat(chat.id, chat);
+    }
+  });
+  sock.ev.on('messaging-history.set', ({ chats, contacts, messages }) => {
+    for (const contact of contacts || []) {
+      rememberContact(contact.id, contact);
+    }
+    for (const chat of chats || []) {
+      rememberChat(chat.id, chat);
+    }
+    for (const message of messages || []) {
+      recordMessage(message);
+    }
+  });
+  startControlServer(sock);
   sock.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
     if (qr && !pairPhoneNumber) {
       console.log('Scan this QR code with WhatsApp:');
@@ -1769,6 +2121,59 @@ async function start() {
       await handleMessage(sock, message);
     }
   });
+}
+
+function startControlServer(sock) {
+  try {
+    unlinkSync(controlSocketPath);
+  } catch {
+  }
+  const server = createServer((connection) => {
+    let buffer = '';
+    connection.setEncoding('utf8');
+    connection.on('data', (chunk) => {
+      buffer += chunk;
+      let newlineIndex;
+      while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
+        const line = buffer.slice(0, newlineIndex);
+        buffer = buffer.slice(newlineIndex + 1);
+        void handleControlLine(sock, connection, line);
+      }
+    });
+  });
+  server.listen(controlSocketPath, () => {
+    console.log(`Anya WhatsApp control socket listening at ${controlSocketPath}`);
+  });
+}
+
+async function handleControlLine(sock, connection, line) {
+  try {
+    const request = JSON.parse(line);
+    let data;
+    switch (request.action) {
+      case 'send':
+        data = await sendOutboundMessage(sock, request.to, String(request.text || ''), request.listenSecs);
+        break;
+      case 'contacts':
+        data = { contacts: listKnownContacts(request.query) };
+        break;
+      case 'read':
+        data = readRecordedMessages(request.chat, request.limit);
+        break;
+      case 'listen': {
+        const jid = resolvePeer(request.chat);
+        data = { jid, listeningUntil: openTemporaryInbound(jid, request.seconds || 300) };
+        break;
+      }
+      default:
+        throw new Error(`unknown WhatsApp control action: ${request.action}`);
+    }
+    connection.write(`${JSON.stringify({ ok: true, ...data })}\n`);
+  } catch (error) {
+    connection.write(`${JSON.stringify({ ok: false, error: error?.message || String(error) })}\n`);
+  } finally {
+    connection.end();
+  }
 }
 
 // Baileys can unref its socket timers after setup returns; keep this bridge
@@ -1881,5 +2286,16 @@ mod tests {
         assert!(
             BRIDGE_MJS.contains("Usage: /thinking <none|minimal|low|medium|high|xhigh|default>")
         );
+    }
+
+    #[test]
+    fn whatsapp_bridge_exposes_agent_control_socket() {
+        assert!(BRIDGE_MJS.contains("ANYA_WHATSAPP_CONTROL_SOCKET"));
+        assert!(BRIDGE_MJS.contains("function startControlServer"));
+        assert!(BRIDGE_MJS.contains("sendOutboundMessage"));
+        assert!(BRIDGE_MJS.contains("readRecordedMessages"));
+        assert!(BRIDGE_MJS.contains("listKnownContacts"));
+        assert!(BRIDGE_MJS.contains("temporaryInboundAllows"));
+        assert!(BRIDGE_MJS.contains("messaging-history.set"));
     }
 }
