@@ -1,3 +1,4 @@
+mod anya_config;
 mod channel;
 mod codex_rpc;
 mod home;
@@ -71,6 +72,8 @@ enum CommandKind {
     Logout(LogoutArgs),
     /// Install or print a systemd unit for Anya.
     Service(ServiceArgs),
+    /// Show, validate, and apply Anya configuration.
+    Config(anya_config::ConfigArgs),
     /// Configure Anya's first-run setup state.
     Setup(setup::SetupArgs),
     /// Install and run the WhatsApp bridge channel.
@@ -348,6 +351,7 @@ async fn run(arg0_paths: Arg0DispatchPaths) -> Result<()> {
         CommandKind::Auth(args) => auth(args).await,
         CommandKind::Logout(args) => logout(args).await,
         CommandKind::Service(args) => service(args).await,
+        CommandKind::Config(args) => anya_config::run(args).await,
         CommandKind::Setup(args) => setup::run(args).await,
         CommandKind::Whatsapp(args) => whatsapp::run(*args).await,
         CommandKind::Channel(args) => channel(args).await,

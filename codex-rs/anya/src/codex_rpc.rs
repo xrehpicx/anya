@@ -39,7 +39,9 @@ When you are running inside the Anya service and need to restart or update that 
 
 const ANYA_WHATSAPP_CHANNEL_INSTRUCTIONS: &str = r#"When speaking through WhatsApp, users can change Anya channel settings with slash commands. Use `/models` to list available model IDs, `/model <model-id>` to set the current WhatsApp channel model, `/model default` to clear it, `/thinking <none|minimal|low|medium|high|xhigh>` to set reasoning effort, and `/thinking default` to clear it. If a user asks to change model or thinking level from WhatsApp, tell them the exact command to send instead of editing config files by hand."#;
 
-const ANYA_SETUP_INSTRUCTIONS: &str = r#"When a user asks whether Anya setup is done, asks to configure Anya, starts a new channel and appears to be initiating setup, or asks what Anya's default working directory is, run `anya setup status --json` before answering. If setup is incomplete, use the `anya-setup` skill, ask one missing setup question at a time, and persist confirmed answers with `anya setup set --default-workdir ... --self-iteration-file ... --confirm`. Do not claim setup is complete without checking this command."#;
+const ANYA_SETUP_INSTRUCTIONS: &str = r#"When a user asks whether Anya setup is done, asks to configure Anya, starts a new channel and appears to be initiating setup, or asks what Anya's default working directory is, run `anya setup status --json` before answering. Treat first-run setup as distinct from service health: `anya.service` running, auth passing, and WhatsApp connected do not mean setup is complete. If setup is incomplete, use the `anya-setup` skill, ask one missing setup question at a time, and persist confirmed answers with `anya setup set --default-workdir ... --self-iteration-file ... --confirm`. Do not claim setup is complete without checking this command.
+
+When the user asks about Anya's own CLI, config files, config validation, or applying config, use the `anya-cli` skill. Anya's nginx-style config workflow is `anya config check --json` before `anya config apply --json`."#;
 
 fn anya_developer_instructions() -> String {
     format!(

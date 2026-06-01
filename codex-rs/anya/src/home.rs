@@ -38,7 +38,8 @@ pub fn anya_home_path() -> Result<PathBuf> {
 
 fn seed_anya_system_skills(anya_home: &Path) -> Result<()> {
     seed_anya_system_skill(anya_home, "anya-whatsapp", ANYA_WHATSAPP_SKILL)?;
-    seed_anya_system_skill(anya_home, "anya-setup", ANYA_SETUP_SKILL)
+    seed_anya_system_skill(anya_home, "anya-setup", ANYA_SETUP_SKILL)?;
+    seed_anya_system_skill(anya_home, "anya-cli", ANYA_CLI_SKILL)
 }
 
 fn seed_anya_system_skill(anya_home: &Path, name: &str, contents: &str) -> Result<()> {
@@ -153,16 +154,16 @@ metadata:
 
 # Anya Setup
 
-Use the `anya setup` CLI. It records explicit setup confirmation in Anya home, separate from inferred workspace instructions.
+Use the `anya setup` CLI. It records explicit setup confirmation in Anya home, separate from inferred workspace instructions and separate from service health. A running service is not the same as completed setup.
 
 ## Commands
 
-- Check setup: `anya setup status --json`
+- Check first-run setup: `anya setup status --json`
 - Persist setup: `anya setup set --default-workdir "<path>" --self-iteration-file "<path>" --confirm`
 
 ## Workflow
 
-1. Run `anya setup status --json` before claiming setup is complete.
+1. Run `anya setup status --json` before claiming setup is complete. Do this before checking service health when the user asks whether Anya is "set up", "configured", "done setup", or "ready setup".
 2. If `complete` is false, ask one setup question at a time. Prefer the `inferredDefaultWorkdir` and `inferredSelfIterationFile` values if present, but ask the user to confirm them.
 3. When the user confirms a default work directory and self-iteration file, run `anya setup set --default-workdir ... --self-iteration-file ... --confirm`.
 4. After persisting setup, tell the user the configured paths and continue with their task.
@@ -170,4 +171,64 @@ Use the `anya setup` CLI. It records explicit setup confirmation in Anya home, s
 ## Defaults
 
 If the user accepts the inferred paths, use them. If there are no inferred paths, suggest `~/anya/projects` for project work and `~/anya/ANYA_SELF_ITERATION.md` for Anya self-iteration instructions.
+"#;
+
+const ANYA_CLI_SKILL: &str = r#"---
+name: anya-cli
+description: "Use when Anya needs to operate, inspect, configure, validate, apply, update, or explain its own CLI and service."
+metadata:
+  short-description: Operate Anya's own CLI
+---
+
+# Anya CLI
+
+Use the `anya` CLI for Anya's own service, configuration, sessions, channels, and WhatsApp bridge. Prefer these commands over ad-hoc file inspection when they exist.
+
+## Config Files
+
+- Anya home: `~/.anya`
+- Main config: `~/.anya/config.toml`
+- First-run setup state: `~/.anya/setup.json`
+- Auth: `~/.anya/auth.json`
+- Bundled/user skills: `~/.anya/skills`
+- WhatsApp config: `~/.local/share/anya/whatsapp/config.json`
+- WhatsApp message log: `~/.local/share/anya/whatsapp/message-log.json`
+
+## Config Workflow
+
+- Show paths: `anya config paths --json`
+- Validate config: `anya config check --json`
+- Apply config like nginx test-and-reload: `anya config apply --json`
+- Apply config to a specific user service: `anya config apply --service anya --json`
+
+Always run `anya config check` before applying config. If check fails, do not apply or restart. Fix the reported file first.
+
+## Setup Workflow
+
+- Check first-run setup: `anya setup status --json`
+- Persist setup: `anya setup set --default-workdir "<path>" --self-iteration-file "<path>" --confirm`
+
+First-run setup is about the user's chosen default workdir and self-iteration file. Service health, auth, and WhatsApp connection can all be OK while first-run setup is still incomplete.
+
+## Service and Auth
+
+- Check auth through the running gateway: `anya auth status --timeout-secs 60`
+- Restart safely from inside Anya: `anya service restart --name anya`
+- Print a unit: `anya service print --user "$USER" --binary "$HOME/.local/bin/anya"`
+
+Do not run `systemctl --user restart anya.service` directly from inside Anya. Use `anya service restart --name anya`.
+
+## Sessions and Models
+
+- Create a channel session: `anya session-create --channel <name>`
+- Send to a channel: `anya session-send --channel <name> --wait "message"`
+- Steer an active turn: `anya session-steer --channel <name> --turn-id <id> "message"`
+- List models: `anya models --format whatsapp`
+
+## WhatsApp
+
+- Contacts/chats: `anya whatsapp contacts --query "<name-or-number>"`
+- Read/sync chat: `anya whatsapp read --chat "<name-or-number-or-jid>" --limit 20`
+- Send: `anya whatsapp send --to "<peer>" "message"`
+- Send and temporarily listen: `anya whatsapp send --to "<peer>" --listen-secs 1800 "message"`
 "#;
