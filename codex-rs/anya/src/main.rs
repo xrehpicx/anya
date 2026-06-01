@@ -72,6 +72,8 @@ enum CommandKind {
     SessionCreate(SessionCreateArgs),
     /// Send a message to an existing session/thread.
     SessionSend(SessionSendArgs),
+    /// Steer an active turn in an existing session/thread.
+    SessionSteer(SessionSteerArgs),
     /// Open an interactive CLI chat bound to a channel.
     Chat(ChatArgs),
     /// Open the Codex TUI for the main Anya session.
@@ -244,6 +246,23 @@ struct SessionSendArgs {
 }
 
 #[derive(Debug, Args)]
+struct SessionSteerArgs {
+    #[arg(long, env = "ANYA_ENDPOINT", default_value = "ws://127.0.0.1:4827")]
+    endpoint: String,
+    #[arg(long)]
+    thread_id: Option<String>,
+    #[arg(long)]
+    channel: Option<String>,
+    #[arg(long)]
+    turn_id: String,
+    /// Attach one or more local image files to this steering input.
+    #[arg(long = "image", value_name = "PATH")]
+    images: Vec<PathBuf>,
+    #[arg(required = true, trailing_var_arg = true)]
+    message: Vec<String>,
+}
+
+#[derive(Debug, Args)]
 struct ChatArgs {
     #[arg(long, env = "ANYA_ENDPOINT", default_value = "ws://127.0.0.1:4827")]
     endpoint: String,
@@ -295,6 +314,7 @@ async fn run(arg0_paths: Arg0DispatchPaths) -> Result<()> {
         CommandKind::Channel(args) => channel(args).await,
         CommandKind::SessionCreate(args) => session_create(args).await,
         CommandKind::SessionSend(args) => session_send(args).await,
+        CommandKind::SessionSteer(args) => session_steer(args).await,
         CommandKind::Chat(args) => chat(args).await,
         CommandKind::Tui(args) => tui(args, arg0_paths).await,
         CommandKind::Rpc(args) => rpc(args).await,
@@ -550,6 +570,27 @@ async fn session_send(args: SessionSendArgs) -> Result<()> {
         serde_json::to_writer_pretty(std::io::stdout(), &response)?;
         println!();
     }
+    Ok(())
+}
+
+async fn session_steer(args: SessionSteerArgs) -> Result<()> {
+    let thread_id = match (args.thread_id, args.channel) {
+        (Some(thread_id), None) => thread_id,
+        (None, Some(channel)) => ChannelStore::load()
+            .await?
+            .resolve(&channel)
+            .with_context(|| format!("unknown channel {channel:?}"))?
+            .to_string(),
+        (Some(_), Some(_)) => anyhow::bail!("pass either --thread-id or --channel, not both"),
+        (None, None) => anyhow::bail!("pass --thread-id or --channel"),
+    };
+    let message = args.message.join(" ");
+    let mut client = CodexRpcClient::connect(&args.endpoint).await?;
+    let response = client
+        .turn_steer(thread_id, args.turn_id, message, args.images)
+        .await?;
+    serde_json::to_writer_pretty(std::io::stdout(), &response)?;
+    println!();
     Ok(())
 }
 

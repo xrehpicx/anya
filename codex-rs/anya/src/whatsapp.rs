@@ -567,7 +567,8 @@ import Pino from 'pino';
 import qrcode from 'qrcode-terminal';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const anyaBinary = process.env.ANYA_BINARY || 'anya';
@@ -587,6 +588,15 @@ const commandTimeoutMs = parseTimeout(
   30_000
 );
 const replyTimeoutMs = parseOptionalTimeout(process.env.ANYA_WHATSAPP_REPLY_TIMEOUT_MS);
+const transcribeAudio = parseBoolEnv(process.env.ANYA_WHATSAPP_TRANSCRIBE_AUDIO, true);
+const transcribeTimeoutMs = parseTimeout(
+  process.env.ANYA_WHATSAPP_TRANSCRIBE_TIMEOUT_MS,
+  180_000
+);
+const transcribeModel = process.env.ANYA_WHATSAPP_TRANSCRIBE_MODEL || 'tiny';
+const transcriberVenv =
+  process.env.ANYA_WHATSAPP_TRANSCRIBE_VENV ||
+  join(tmpdir(), 'anya-whatsapp-stt-venv');
 const sessionDir =
   process.env.ANYA_WHATSAPP_SESSION_DIR ||
   join(process.env.HOME || '.', '.local', 'share', 'anya', 'whatsapp', 'session');
@@ -631,6 +641,68 @@ function parseBoolEnv(value, fallback) {
 function normalizePolicy(value, fallback) {
   const normalized = String(value || fallback).trim().toLowerCase();
   return ['open', 'allowlist', 'disabled'].includes(normalized) ? normalized : fallback;
+}
+
+function runProcess(command, args, options = {}) {
+  const timeoutMs = options.timeoutMs || commandTimeoutMs;
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    let sentSignal = false;
+    let killTimer;
+    const stopChild = () => {
+      if (child.exitCode !== null || sentSignal) return;
+      child.kill('SIGTERM');
+      sentSignal = true;
+      killTimer = setTimeout(() => {
+        if (child.exitCode === null) child.kill('SIGKILL');
+      }, 2_000);
+      killTimer.unref?.();
+    };
+    const settle = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      clearTimeout(killTimer);
+      fn(value);
+    };
+    const timeout = setTimeout(() => {
+      stopChild();
+      settle(reject, new Error(`${command} timed out after ${Math.round(timeoutMs / 1000)}s`));
+    }, timeoutMs);
+    timeout.unref?.();
+
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk;
+      if (stdout.length > 10 * 1024 * 1024) {
+        stopChild();
+        settle(reject, new Error(`${command} stdout exceeded 10 MiB`));
+      }
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+      if (stderr.length > 10 * 1024 * 1024) {
+        stopChild();
+        settle(reject, new Error(`${command} stderr exceeded 10 MiB`));
+      }
+    });
+    child.on('error', (error) => settle(reject, error));
+    child.on('close', (code, signal) => {
+      if (settled) return;
+      if (code === 0) {
+        settle(resolve, stdout);
+        return;
+      }
+      const detail = stderr.trim() || stdout.trim() || `${command} exited with ${code ?? signal}`;
+      settle(reject, new Error(detail));
+    });
+  });
 }
 
 function runAnya(args, options = {}) {
@@ -679,6 +751,7 @@ function runAnya(args, options = {}) {
     if (activeKey) {
       activeRuns.set(activeKey, {
         child,
+        turnId: null,
         stop: () => {
           stopChild();
           fail(new AnyaRunStoppedError());
@@ -764,6 +837,7 @@ function streamAnya(args, callbacks, options = {}) {
     if (activeKey) {
       activeRuns.set(activeKey, {
         child,
+        turnId: null,
         stop: () => {
           stopChild();
           fail(new AnyaRunStoppedError());
@@ -1008,6 +1082,65 @@ async function downloadMediaAttachment(message) {
   };
 }
 
+let transcriberSetup;
+
+async function ensureTranscriber() {
+  const python = join(transcriberVenv, 'bin', 'python');
+  if (existsSync(python)) return python;
+  if (!transcriberSetup) {
+    transcriberSetup = (async () => {
+      await runProcess('python3', ['-m', 'venv', transcriberVenv], {
+        timeoutMs: transcribeTimeoutMs,
+      });
+      const pip = join(transcriberVenv, 'bin', 'pip');
+      await runProcess(pip, ['install', '--quiet', '--upgrade', 'pip'], {
+        timeoutMs: transcribeTimeoutMs,
+      });
+      await runProcess(pip, ['install', '--quiet', 'faster-whisper'], {
+        timeoutMs: transcribeTimeoutMs,
+      });
+      return python;
+    })();
+  }
+  return transcriberSetup;
+}
+
+async function transcribeAudioAttachment(attachment) {
+  if (!transcribeAudio || !attachment || !['audio', 'voice'].includes(attachment.kind)) {
+    return attachment;
+  }
+  try {
+    const python = await ensureTranscriber();
+    const script = `
+from faster_whisper import WhisperModel
+import sys
+
+path = sys.argv[1]
+model_name = sys.argv[2]
+model = WhisperModel(model_name, device="cpu", compute_type="int8")
+segments, info = model.transcribe(path, beam_size=5, vad_filter=True)
+text = " ".join(segment.text.strip() for segment in segments).strip()
+print(text)
+`;
+    const transcript = (await runProcess(python, ['-c', script, attachment.path, transcribeModel], {
+      timeoutMs: transcribeTimeoutMs,
+    })).trim();
+    if (transcript) {
+      return {
+        ...attachment,
+        transcript,
+      };
+    }
+  } catch (error) {
+    console.error(`Anya WhatsApp audio transcription error: ${error?.stack || error?.message || error}`);
+    return {
+      ...attachment,
+      transcriptionError: error?.message || String(error),
+    };
+  }
+  return attachment;
+}
+
 function promptWithMedia(text, attachment) {
   if (!attachment) return text;
   const lines = [];
@@ -1018,6 +1151,11 @@ function promptWithMedia(text, attachment) {
     `- ${attachment.promptLabel}: ${attachment.path} (${attachment.mimeType}, ${attachment.sizeBytes} bytes).${asImage}`
   );
   if (!attachment.imageInput) {
+    if (attachment.transcript) {
+      lines.push(`Auto-transcription: ${attachment.transcript}`);
+    } else if (attachment.transcriptionError) {
+      lines.push(`Auto-transcription failed: ${attachment.transcriptionError}`);
+    }
     lines.push('Use local shell tools on the saved file if you need to inspect, transcribe, summarize, convert, or parse it.');
   }
   return lines.join('\n').trim();
@@ -1251,7 +1389,13 @@ async function streamPrompt(sock, remoteJid, message, channel, text, options = {
         if (shouldFlushText(buffer, delta)) flush();
         else scheduleFlush();
       },
-      onActivity: sendPresence,
+      onActivity: (event) => {
+        if (event?.type === 'turn_accepted' && event.turn_id) {
+          const active = activeRuns.get(channel);
+          if (active) active.turnId = event.turn_id;
+        }
+        sendPresence();
+      },
     }, {
       activeKey: channel,
       timeoutMs: replyTimeoutMs,
@@ -1272,6 +1416,48 @@ async function streamPromptWithRecovery(sock, remoteJid, message, channel, text,
     await createChannelSession(remoteJid);
     await streamPrompt(sock, remoteJid, message, channel, text, options);
   }
+}
+
+async function waitForActiveTurnId(channel, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const active = activeRuns.get(channel);
+    if (!active) return null;
+    if (active.turnId) return active.turnId;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return activeRuns.get(channel)?.turnId || null;
+}
+
+async function steerActiveRun(sock, remoteJid, message, channel, text, options = {}) {
+  const turnId = await waitForActiveTurnId(channel);
+  if (!turnId) {
+    await replyText(
+      sock,
+      remoteJid,
+      message,
+      'Anya is already replying, but the active turn is not ready for steering yet.',
+      { quoted: true }
+    );
+    return;
+  }
+  const args = [
+    'session-steer',
+    '--endpoint',
+    endpoint,
+    '--channel',
+    channel,
+    '--turn-id',
+    turnId,
+  ];
+  for (const image of options.images || []) {
+    args.push('--image', image);
+  }
+  args.push(text);
+  await runAnya(args, {
+    timeoutMs: commandTimeoutMs,
+  });
+  await replyText(sock, remoteJid, message, 'Sent to the active Anya turn.', { quoted: true });
 }
 
 async function handleSlashCommand(sock, remoteJid, message, command) {
@@ -1313,12 +1499,7 @@ async function handleSlashCommand(sock, remoteJid, message, command) {
       }
       await ensureChannel(remoteJid);
       if (activeRuns.has(channel)) {
-        await replyText(
-          sock,
-          remoteJid,
-          message,
-          'Anya is already replying in this channel. Send /stop to cancel it first.'
-        );
+        await steerActiveRun(sock, remoteJid, message, channel, command.rest);
         return true;
       }
       try {
@@ -1383,7 +1564,7 @@ async function handleMessage(sock, message) {
   if (!text && !inboundMedia) return;
 
   try {
-    const attachment = await downloadMediaAttachment(message);
+    const attachment = await transcribeAudioAttachment(await downloadMediaAttachment(message));
     const prompt = promptWithMedia(
       text || `Please inspect this WhatsApp ${attachment?.promptLabel || 'attachment'}.`,
       attachment
@@ -1391,12 +1572,7 @@ async function handleMessage(sock, message) {
     const images = attachment?.imageInput ? [attachment.path] : [];
     const channel = await ensureChannel(remoteJid);
     if (activeRuns.has(channel)) {
-      await replyText(
-        sock,
-        remoteJid,
-        message,
-        'Anya is already replying in this channel. Send /stop to cancel it first.'
-      );
+      await steerActiveRun(sock, remoteJid, message, channel, prompt, { images });
       return;
     }
 
@@ -1532,6 +1708,9 @@ mod tests {
         assert!(BRIDGE_MJS.contains("downloadContentFromMessage"));
         assert!(BRIDGE_MJS.contains("ANYA_WHATSAPP_MEDIA_DIR"));
         assert!(BRIDGE_MJS.contains("ANYA_WHATSAPP_MAX_MEDIA_BYTES"));
+        assert!(BRIDGE_MJS.contains("ANYA_WHATSAPP_TRANSCRIBE_AUDIO"));
+        assert!(BRIDGE_MJS.contains("faster-whisper"));
+        assert!(BRIDGE_MJS.contains("Auto-transcription:"));
         assert!(BRIDGE_MJS.contains("payload.imageMessage"));
         assert!(BRIDGE_MJS.contains("payload.videoMessage"));
         assert!(BRIDGE_MJS.contains("payload.audioMessage"));
@@ -1546,5 +1725,13 @@ mod tests {
         assert!(BRIDGE_MJS.contains("Attached as an image input."));
         assert!(BRIDGE_MJS.contains("Use local shell tools on the saved file"));
         assert!(BRIDGE_MJS.contains("mediaKind: inboundMedia?.kind || null"));
+    }
+
+    #[test]
+    fn whatsapp_bridge_steers_active_runs() {
+        assert!(BRIDGE_MJS.contains("session-steer"));
+        assert!(BRIDGE_MJS.contains("turn_accepted"));
+        assert!(BRIDGE_MJS.contains("waitForActiveTurnId"));
+        assert!(BRIDGE_MJS.contains("Sent to the active Anya turn."));
     }
 }

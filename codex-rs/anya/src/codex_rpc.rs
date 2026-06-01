@@ -16,6 +16,8 @@ use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
+use codex_app_server_protocol::TurnSteerParams;
+use codex_app_server_protocol::TurnSteerResponse;
 use codex_app_server_protocol::UserInput;
 use futures::SinkExt;
 use futures::StreamExt;
@@ -103,6 +105,26 @@ impl CodexRpcClient {
         .await
     }
 
+    pub async fn turn_steer(
+        &mut self,
+        thread_id: String,
+        expected_turn_id: String,
+        text: String,
+        images: Vec<PathBuf>,
+    ) -> Result<TurnSteerResponse> {
+        let request_id = self.request_id();
+        self.request_typed(ClientRequest::TurnSteer {
+            request_id,
+            params: TurnSteerParams {
+                thread_id,
+                input: turn_input(text, images),
+                expected_turn_id,
+                ..TurnSteerParams::default()
+            },
+        })
+        .await
+    }
+
     pub async fn turn_start_streaming(
         &mut self,
         thread_id: String,
@@ -150,9 +172,14 @@ impl CodexRpcClient {
             match rpc_message {
                 JSONRPCMessage::Response(response) if response.id == request_id => {
                     saw_response = true;
+                    let response = serde_json::from_value::<TurnStartResponse>(response.result)
+                        .context("decode turn/start response")?;
                     write_json_stream_event(
                         &mut stdout,
-                        serde_json::json!({ "type": "turn_accepted" }),
+                        serde_json::json!({
+                            "type": "turn_accepted",
+                            "turn_id": response.turn.id,
+                        }),
                     )?;
                     if saw_completion {
                         break;
