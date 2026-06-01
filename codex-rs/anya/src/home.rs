@@ -126,7 +126,7 @@ Use the `anya whatsapp` CLI. These commands talk to the already-running Anya gat
 ## Commands
 
 - List known peers: `anya whatsapp contacts --query "<name-or-number>"`
-- Read recent recorded messages: `anya whatsapp read --chat "<name-number-or-jid>" --limit 20`
+- Read and sync recent messages: `anya whatsapp read --chat "<name-number-or-jid>" --limit 20`
 - Send a message: `anya whatsapp send --to "<number-or-jid-or-known-name>" "message text"`
 - Send and temporarily accept replies from that peer: `anya whatsapp send --to "<peer>" --listen-secs 1800 "message text"`
 - Open a temporary listen window without sending: `anya whatsapp listen --chat "<peer>" --seconds 900`
@@ -136,12 +136,12 @@ Use the `anya whatsapp` CLI. These commands talk to the already-running Anya gat
 1. Resolve the recipient first with `contacts` when the user gives a name. If there are ambiguous matches, ask the user which one to use.
 2. Use phone numbers in E.164 form when possible, for example `+15551234567`. The bridge normalizes numbers to WhatsApp JIDs.
 3. Before sending sensitive or surprising messages, confirm the exact recipient and text with the user.
-4. When the user asks whether someone replied, call `read` for that chat. The read command returns the bridge's recent recorded messages, including messages received while the gateway was running and outbound messages sent through this skill.
+4. When the user asks whether someone replied, call `read` for that chat. The read command returns the bridge's known messages and attempts an on-demand WhatsApp history sync when it has an anchor message for that chat.
 5. If Anya initiates a conversation and expects a reply, use `--listen-secs` on `send` or call `listen`. This temporarily admits inbound messages from that peer even when normal inbound policy would not.
 
 ## Limits
 
-The bridge can read the recent message log it recorded while connected. It is not a full phone backup extractor and may not have old WhatsApp history from before Anya's bridge observed or sent messages.
+The bridge can read messages it has observed or received from WhatsApp history sync. On-demand WhatsApp history requires at least one anchor message in that chat. If `read` returns `sync.reason = "no_anchor_message"`, say that Anya cannot verify old phone-only history for that chat yet; the user may need to re-link WhatsApp after this Anya version so the bridge can request full desktop history.
 "#;
 
 const ANYA_SETUP_SKILL: &str = r#"---

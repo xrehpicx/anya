@@ -41,7 +41,7 @@ enum WhatsappCommand {
     Send(WhatsappSendArgs),
     /// List known WhatsApp chats and contacts from the running bridge.
     Contacts(WhatsappContactsArgs),
-    /// Read recent recorded messages for a WhatsApp chat.
+    /// Read and sync recent messages for a WhatsApp chat.
     Read(WhatsappReadArgs),
     /// Temporarily allow/listen for inbound messages from a WhatsApp chat.
     Listen(WhatsappListenArgs),
@@ -723,6 +723,7 @@ const PACKAGE_JSON: &str = r#"{
 "#;
 
 const BRIDGE_MJS: &str = r#"import makeWASocket, {
+  Browsers,
   DisconnectReason,
   downloadContentFromMessage,
   fetchLatestBaileysVersion,
@@ -778,11 +779,13 @@ const controlSocketPath =
 const messageLogPath =
   process.env.ANYA_WHATSAPP_MESSAGE_LOG_PATH ||
   join(process.env.HOME || '.', '.local', 'share', 'anya', 'whatsapp', 'message-log.json');
+const historySyncWaitMs = parseTimeout(process.env.ANYA_WHATSAPP_HISTORY_SYNC_WAIT_MS, 12_000);
 const maxMediaBytes = parseTimeout(process.env.ANYA_WHATSAPP_MAX_MEDIA_BYTES, 25 * 1024 * 1024);
 const activeRuns = new Map();
 const knownContacts = new Map();
 const knownChats = new Map();
 const temporaryInboundAllows = new Map();
+const pendingHistoryReads = new Map();
 let channelSettings = loadChannelSettings();
 let messageLog = loadMessageLog();
 
@@ -1237,13 +1240,88 @@ function compactMessage(message) {
 
 function recordMessage(message) {
   const entry = compactMessage(message);
-  if (!entry) return;
+  if (!entry) return null;
   rememberChat(entry.jid, { name: entry.name, lastMessageAt: entry.timestamp });
   const list = Array.isArray(messageLog[entry.jid]) ? messageLog[entry.jid] : [];
-  if (entry.id && list.some((existing) => existing.id === entry.id)) return;
+  if (entry.id && list.some((existing) => existing.id === entry.id)) return entry.jid;
   list.push(entry);
   messageLog[entry.jid] = list.slice(-100);
   saveMessageLog();
+  return entry.jid;
+}
+
+function oldestRecordedMessage(jid) {
+  const list = Array.isArray(messageLog[jid]) ? messageLog[jid] : [];
+  return list.find((entry) => entry?.id && Number.isFinite(Number(entry.timestamp))) || null;
+}
+
+function waitForHistoryMessages(jid, beforeCount) {
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      cleanup();
+      resolve({ received: false, added: 0 });
+    }, historySyncWaitMs);
+    timeout.unref?.();
+
+    const cleanup = () => {
+      clearTimeout(timeout);
+      const waiters = pendingHistoryReads.get(jid) || [];
+      const next = waiters.filter((waiter) => waiter !== check);
+      if (next.length === 0) pendingHistoryReads.delete(jid);
+      else pendingHistoryReads.set(jid, next);
+    };
+
+    const check = () => {
+      const afterCount = Array.isArray(messageLog[jid]) ? messageLog[jid].length : 0;
+      if (afterCount <= beforeCount) return;
+      cleanup();
+      resolve({ received: true, added: afterCount - beforeCount });
+    };
+
+    const waiters = pendingHistoryReads.get(jid) || [];
+    waiters.push(check);
+    pendingHistoryReads.set(jid, waiters);
+  });
+}
+
+function notifyHistoryMessages(jids) {
+  for (const jid of jids) {
+    const waiters = pendingHistoryReads.get(jid) || [];
+    for (const waiter of waiters) waiter();
+  }
+}
+
+async function syncChatHistory(sock, jid, requestedCount) {
+  const existing = Array.isArray(messageLog[jid]) ? messageLog[jid] : [];
+  const anchor = oldestRecordedMessage(jid);
+  if (!anchor) {
+    return {
+      attempted: false,
+      reason: 'no_anchor_message',
+      detail: 'WhatsApp on-demand history requires at least one recorded message in that chat. Re-link the bridge with full history enabled or wait until a message from this chat is observed.',
+    };
+  }
+
+  const count = Math.max(1, Math.min(Number.parseInt(requestedCount || 20, 10) || 20, 50));
+  const waitForHistory = waitForHistoryMessages(jid, existing.length);
+  const requestId = await sock.fetchMessageHistory(
+    count,
+    {
+      remoteJid: jid,
+      fromMe: Boolean(anchor.fromMe),
+      id: anchor.id,
+      participant: anchor.participant || undefined,
+    },
+    anchor.timestamp
+  );
+  const result = await waitForHistory;
+  return {
+    attempted: true,
+    requestId,
+    anchorId: anchor.id,
+    anchorTimestamp: anchor.timestamp,
+    ...result,
+  };
 }
 
 function openTemporaryInbound(jid, seconds) {
@@ -1287,11 +1365,13 @@ async function sendOutboundMessage(sock, to, text, listenSecs = 0) {
   return { jid, messageId: entry.id, listeningUntil };
 }
 
-function readRecordedMessages(chat, limit) {
+async function readRecordedMessages(sock, chat, limit) {
   const jid = resolvePeer(chat);
   const count = Math.max(1, Math.min(Number.parseInt(limit || 20, 10) || 20, 100));
+  const sync = await syncChatHistory(sock, jid, count);
   return {
     jid,
+    sync,
     messages: (messageLog[jid] || []).slice(-count),
   };
 }
@@ -2077,8 +2157,10 @@ async function start() {
   const { version } = await fetchLatestBaileysVersion();
   const sock = makeWASocket({
     auth: state,
+    browser: Browsers.macOS('Desktop'),
     logger: Pino({ level: process.env.ANYA_WHATSAPP_LOG_LEVEL || 'fatal' }),
     printQRInTerminal: false,
+    syncFullHistory: true,
     version,
   });
 
@@ -2104,9 +2186,19 @@ async function start() {
     for (const chat of chats || []) {
       rememberChat(chat.id, chat);
     }
+    const changedJids = new Set();
     for (const message of messages || []) {
-      recordMessage(message);
+      const jid = recordMessage(message);
+      if (jid) changedJids.add(jid);
     }
+    console.log(JSON.stringify({
+      event: 'whatsapp_history_sync',
+      chats: chats?.length || 0,
+      contacts: contacts?.length || 0,
+      messages: messages?.length || 0,
+      changedChats: changedJids.size,
+    }));
+    notifyHistoryMessages(changedJids);
   });
   startControlServer(sock);
   sock.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
@@ -2168,7 +2260,7 @@ async function handleControlLine(sock, connection, line) {
         data = { contacts: listKnownContacts(request.query) };
         break;
       case 'read':
-        data = readRecordedMessages(request.chat, request.limit);
+        data = await readRecordedMessages(sock, request.chat, request.limit);
         break;
       case 'listen': {
         const jid = resolvePeer(request.chat);
@@ -2307,5 +2399,16 @@ mod tests {
         assert!(BRIDGE_MJS.contains("listKnownContacts"));
         assert!(BRIDGE_MJS.contains("temporaryInboundAllows"));
         assert!(BRIDGE_MJS.contains("messaging-history.set"));
+    }
+
+    #[test]
+    fn whatsapp_bridge_syncs_chat_history_for_reads() {
+        assert!(BRIDGE_MJS.contains("syncFullHistory: true"));
+        assert!(BRIDGE_MJS.contains("Browsers.macOS('Desktop')"));
+        assert!(BRIDGE_MJS.contains("function syncChatHistory"));
+        assert!(BRIDGE_MJS.contains("sock.fetchMessageHistory"));
+        assert!(BRIDGE_MJS.contains("no_anchor_message"));
+        assert!(BRIDGE_MJS.contains("whatsapp_history_sync"));
+        assert!(BRIDGE_MJS.contains("notifyHistoryMessages"));
     }
 }
