@@ -30,6 +30,7 @@ use tracing::warn;
 
 use super::ARCHIVED_SESSIONS_SUBDIR;
 use super::SESSIONS_SUBDIR;
+use super::compression;
 use super::list::Cursor;
 use super::list::SortDirection;
 use super::list::ThreadItem;
@@ -699,17 +700,20 @@ impl RolloutRecorder {
 
                 (None, Some(log_file_info), path, Some(session_meta))
             }
-            RolloutRecorderParams::Resume { path } => (
-                Some(
-                    tokio::fs::OpenOptions::new()
-                        .append(true)
-                        .open(&path)
-                        .await?,
-                ),
-                None,
-                path,
-                None,
-            ),
+            RolloutRecorderParams::Resume { path } => {
+                let path = compression::materialize_rollout_for_append(path.as_path()).await?;
+                (
+                    Some(
+                        tokio::fs::OpenOptions::new()
+                            .append(true)
+                            .open(&path)
+                            .await?,
+                    ),
+                    None,
+                    path,
+                    None,
+                )
+            }
         };
 
         // Clone the cwd for the spawned task to collect git info asynchronously
@@ -820,19 +824,17 @@ impl RolloutRecorder {
         path: &Path,
     ) -> std::io::Result<(Vec<RolloutItem>, Option<ThreadId>, usize)> {
         trace!("Resuming rollout from {path:?}");
-        let text = tokio::fs::read_to_string(path).await?;
-        if text.trim().is_empty() {
-            return Err(IoError::other("empty session file"));
-        }
-
         let mut items: Vec<RolloutItem> = Vec::new();
         let mut thread_id: Option<ThreadId> = None;
         let mut parse_errors = 0usize;
-        for line in text.lines() {
+        let mut reader = compression::open_rollout_line_reader(path).await?;
+        let mut saw_non_empty_line = false;
+        while let Some(line) = reader.next_line().await? {
             if line.trim().is_empty() {
                 continue;
             }
-            let mut v: Value = match serde_json::from_str(line) {
+            saw_non_empty_line = true;
+            let mut v: Value = match serde_json::from_str(&line) {
                 Ok(v) => v,
                 Err(e) => {
                     warn!("failed to parse line as JSON: {line:?}, error: {e}");
@@ -875,6 +877,9 @@ impl RolloutRecorder {
                 }
             }
         }
+        if !saw_non_empty_line {
+            return Err(IoError::other("empty session file"));
+        }
 
         tracing::debug!(
             "Resumed rollout with {} items, thread ID: {:?}, parse errors: {}",
@@ -898,7 +903,7 @@ impl RolloutRecorder {
         Ok(InitialHistory::Resumed(ResumedHistory {
             conversation_id,
             history: items,
-            rollout_path: Some(path.to_path_buf()),
+            rollout_path: Some(compression::plain_rollout_path(path)),
         }))
     }
 
@@ -1366,6 +1371,7 @@ fn precompute_log_file_info(
 }
 
 fn open_log_file(path: &Path) -> std::io::Result<File> {
+    let path = compression::materialize_rollout_for_append_blocking(path)?;
     let Some(parent) = path.parent() else {
         return Err(IoError::other(format!(
             "rollout path has no parent: {}",
@@ -1625,6 +1631,7 @@ pub async fn append_rollout_item_to_path(
     rollout_path: &Path,
     item: &RolloutItem,
 ) -> std::io::Result<()> {
+    let rollout_path = compression::materialize_rollout_for_append(rollout_path).await?;
     let file = tokio::fs::OpenOptions::new()
         .append(true)
         .open(rollout_path)

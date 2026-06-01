@@ -18,6 +18,7 @@ use uuid::Uuid;
 
 use super::ARCHIVED_SESSIONS_SUBDIR;
 use super::SESSIONS_SUBDIR;
+use super::compression;
 use crate::protocol::EventMsg;
 use crate::state_db;
 use codex_file_search as file_search;
@@ -896,21 +897,18 @@ async fn collect_flat_rollout_files(
         {
             continue;
         }
-        let file_name = entry.file_name();
-        let Some(name_str) = file_name.to_str() else {
+        let Some(rollout_file) = compression::RolloutFile::from_path(entry.path()) else {
             continue;
         };
-        if !name_str.starts_with("rollout-") || !name_str.ends_with(".jsonl") {
-            continue;
-        }
-        let Some((ts, id)) = parse_timestamp_uuid_from_filename(name_str) else {
+        let Some((ts, id)) = parse_timestamp_uuid_from_filename(rollout_file.plain_file_name())
+        else {
             continue;
         };
         *scanned_files += 1;
         if *scanned_files > MAX_SCAN_FILES {
             break;
         }
-        collected.push((ts, id, entry.path()));
+        collected.push((ts, id, rollout_file.into_path()));
     }
     collected.sort_by_key(|(ts, sid, _path)| (Reverse(*ts), Reverse(*sid)));
     Ok(collected)
@@ -919,12 +917,10 @@ async fn collect_flat_rollout_files(
 async fn collect_rollout_day_files(
     day_path: &Path,
 ) -> io::Result<Vec<(OffsetDateTime, Uuid, PathBuf)>> {
-    let mut day_files = collect_files(day_path, |name_str, path| {
-        if !name_str.starts_with("rollout-") || !name_str.ends_with(".jsonl") {
-            return None;
-        }
-
-        parse_timestamp_uuid_from_filename(name_str).map(|(ts, id)| (ts, id, path.to_path_buf()))
+    let mut day_files = collect_files(day_path, |_name_str, path| {
+        let rollout_file = compression::RolloutFile::from_path(path.to_path_buf())?;
+        parse_timestamp_uuid_from_filename(rollout_file.plain_file_name())
+            .map(|(ts, id)| (ts, id, rollout_file.into_path()))
     })
     .await?;
     // Stable ordering within the same second: (timestamp desc, uuid desc)
@@ -933,7 +929,8 @@ async fn collect_rollout_day_files(
 }
 
 pub(crate) fn parse_timestamp_uuid_from_filename(name: &str) -> Option<(OffsetDateTime, Uuid)> {
-    // Expected: rollout-YYYY-MM-DDThh-mm-ss-<uuid>.jsonl
+    // Expected: rollout-YYYY-MM-DDThh-mm-ss-<uuid>.jsonl[.zst]
+    let name = compression::parse_rollout_file_name(name)?;
     let core = name.strip_prefix("rollout-")?.strip_suffix(".jsonl")?;
 
     // Scan from the right for a '-' such that the suffix parses as a UUID.
@@ -986,23 +983,22 @@ async fn collect_flat_files_by_updated_at(
         {
             continue;
         }
-        let file_name = entry.file_name();
-        let Some(name_str) = file_name.to_str() else {
+        let Some(rollout_file) = compression::RolloutFile::from_path(entry.path()) else {
             continue;
         };
-        if !name_str.starts_with("rollout-") || !name_str.ends_with(".jsonl") {
-            continue;
-        }
-        let Some((_ts, id)) = parse_timestamp_uuid_from_filename(name_str) else {
+        let Some((_ts, id)) = parse_timestamp_uuid_from_filename(rollout_file.plain_file_name())
+        else {
             continue;
         };
         *scanned_files += 1;
         if *scanned_files > MAX_SCAN_FILES {
             break;
         }
-        let updated_at = file_modified_time(&entry.path()).await.unwrap_or(None);
+        let updated_at = file_modified_time(rollout_file.path())
+            .await
+            .unwrap_or(None);
         candidates.push(ThreadCandidate {
-            path: entry.path(),
+            path: rollout_file.into_path(),
             id,
             updated_at,
         });
@@ -1078,11 +1074,7 @@ impl<'a> ProviderMatcher<'a> {
 }
 
 async fn read_head_summary(path: &Path, head_limit: usize) -> io::Result<HeadTailSummary> {
-    use tokio::io::AsyncBufReadExt;
-
-    let file = tokio::fs::File::open(path).await?;
-    let reader = tokio::io::BufReader::new(file);
-    let mut lines = reader.lines();
+    let mut lines = compression::open_rollout_line_reader(path).await?;
     let mut summary = HeadTailSummary::default();
     let mut lines_scanned = 0usize;
 
@@ -1169,11 +1161,7 @@ async fn read_head_summary(path: &Path, head_limit: usize) -> io::Result<HeadTai
 /// Read up to `HEAD_RECORD_LIMIT` records from the start of the rollout file at `path`.
 /// This should be enough to produce a summary including the session meta line.
 pub async fn read_head_for_summary(path: &Path) -> io::Result<Vec<serde_json::Value>> {
-    use tokio::io::AsyncBufReadExt;
-
-    let file = tokio::fs::File::open(path).await?;
-    let reader = tokio::io::BufReader::new(file);
-    let mut lines = reader.lines();
+    let mut lines = compression::open_rollout_line_reader(path).await?;
     let mut head = Vec::new();
 
     while head.len() < HEAD_RECORD_LIMIT {
@@ -1257,13 +1245,9 @@ pub async fn read_session_meta_line(path: &Path) -> io::Result<SessionMetaLine> 
 }
 
 async fn file_modified_time(path: &Path) -> io::Result<Option<OffsetDateTime>> {
-    let meta = tokio::fs::metadata(path).await?;
-    let modified = meta.modified().ok();
-    let Some(modified) = modified else {
-        return Ok(None);
-    };
-    let dt = OffsetDateTime::from(modified);
-    Ok(truncate_to_millis(dt))
+    Ok(compression::file_modified_time(path)
+        .await?
+        .and_then(truncate_to_millis))
 }
 
 fn format_rfc3339(dt: OffsetDateTime) -> Option<String> {
@@ -1304,16 +1288,18 @@ async fn find_thread_path_by_id_str_in_subdir(
             .await
         {
             Ok(Some(db_path)) => {
-                if tokio::fs::try_exists(&db_path).await.unwrap_or(false) {
-                    match read_session_meta_line(&db_path).await {
+                if let Some(existing_db_path) =
+                    compression::existing_rollout_path(db_path.as_path()).await
+                {
+                    match read_session_meta_line(&existing_db_path).await {
                         Ok(meta_line) if meta_line.meta.id == thread_id => {
-                            return Ok(Some(db_path));
+                            return Ok(Some(existing_db_path));
                         }
                         Ok(meta_line) => {
                             tracing::error!(
                                 "state db returned rollout path for thread {id_str} but file belongs to thread {}: {}",
                                 meta_line.meta.id,
-                                db_path.display()
+                                existing_db_path.display()
                             );
                             tracing::warn!(
                                 "state db discrepancy during find_thread_path_by_id_str_in_subdir: mismatched_db_path"
@@ -1327,9 +1313,9 @@ async fn find_thread_path_by_id_str_in_subdir(
                         Err(err) => {
                             tracing::debug!(
                                 "state db returned rollout path for thread {id_str} that could not be verified: {}: {err}",
-                                db_path.display()
+                                existing_db_path.display()
                             );
-                            unverified_db_path = Some(db_path);
+                            unverified_db_path = Some(existing_db_path);
                         }
                     }
                 } else {
@@ -1372,10 +1358,23 @@ async fn find_thread_path_by_id_str_in_subdir(
         ..Default::default()
     };
 
-    let results = file_search::run(id_str, vec![root], options, /*cancel_flag*/ None)
-        .map_err(|e| io::Error::other(format!("file search failed: {e}")))?;
+    let results = file_search::run(
+        id_str,
+        vec![root.clone()],
+        options,
+        /*cancel_flag*/ None,
+    )
+    .map_err(|e| io::Error::other(format!("file search failed: {e}")))?;
 
-    let found = results.matches.into_iter().next().map(|m| m.full_path());
+    let found = match results
+        .matches
+        .into_iter()
+        .map(|m| m.full_path())
+        .find_map(compression::RolloutFile::from_path)
+    {
+        Some(rollout_file) => Some(rollout_file.into_path()),
+        None => find_rollout_path_by_id_from_filenames(root.as_path(), id_str).await?,
+    };
     if let Some(found_path) = found.as_ref() {
         tracing::debug!("state db missing rollout path for thread {id_str}");
         tracing::warn!(
@@ -1398,6 +1397,46 @@ async fn find_thread_path_by_id_str_in_subdir(
     }
 
     Ok(found.or(unverified_db_path))
+}
+
+async fn find_rollout_path_by_id_from_filenames(
+    root: &Path,
+    id_str: &str,
+) -> io::Result<Option<PathBuf>> {
+    let Ok(target) = Uuid::parse_str(id_str) else {
+        return Ok(None);
+    };
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let mut read_dir = match tokio::fs::read_dir(dir.as_path()).await {
+            Ok(read_dir) => read_dir,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(err),
+        };
+        while let Some(entry) = read_dir.next_entry().await? {
+            let path = entry.path();
+            let file_type = entry.file_type().await?;
+            if file_type.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if !file_type.is_file() {
+                continue;
+            }
+            let Some(rollout_file) = compression::RolloutFile::from_path(path) else {
+                continue;
+            };
+            let Some((_ts, id)) =
+                parse_timestamp_uuid_from_filename(rollout_file.plain_file_name())
+            else {
+                continue;
+            };
+            if id == target {
+                return Ok(Some(rollout_file.into_path()));
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// Locate a recorded thread rollout file by its UUID string using the existing
