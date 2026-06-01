@@ -80,6 +80,7 @@ use codex_otel::set_parent_from_context;
 use codex_otel::traceparent_context_from_env;
 use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
+use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::SandboxMode;
 use codex_protocol::models::ActivePermissionProfile;
 use codex_protocol::models::PermissionProfile;
@@ -134,6 +135,7 @@ pub use exec_events::TurnStartedEvent;
 pub use exec_events::Usage;
 pub use exec_events::WebSearchItem;
 use serde_json::Value;
+use std::future::Future;
 use std::io::IsTerminal;
 use std::io::Read;
 use std::path::Path;
@@ -399,11 +401,11 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         None // No model specified, will use the default.
     };
 
-    // Load configuration and determine approval policy
     let overrides = ConfigOverrides {
         model,
         review_model: None,
-        // Default to never ask for approvals in headless mode. Feature flags can override.
+        // Default to never ask for approvals in headless mode. Rebuild below if
+        // the fully resolved reviewer is AutoReview.
         approval_policy: Some(AskForApproval::Never),
         approvals_reviewer: None,
         sandbox_mode,
@@ -428,14 +430,22 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         additional_writable_roots: add_dir,
     };
 
-    let config = ConfigBuilder::default()
-        .cli_overrides(cli_kv_overrides)
-        .harness_overrides(overrides)
-        .loader_overrides(loader_overrides)
-        .strict_config(strict_config)
-        .cloud_requirements(cloud_requirements)
-        .build()
-        .await?;
+    let build_config = |overrides| {
+        ConfigBuilder::default()
+            .codex_home(codex_home.to_path_buf())
+            .cli_overrides(cli_kv_overrides.clone())
+            .harness_overrides(overrides)
+            .loader_overrides(loader_overrides.clone())
+            .strict_config(strict_config)
+            .cloud_requirements(cloud_requirements.clone())
+            .build()
+    };
+    let config = build_exec_config(
+        overrides,
+        dangerously_bypass_approvals_and_sandbox || removed_full_auto,
+        build_config,
+    )
+    .await?;
 
     #[allow(clippy::print_stderr)]
     match check_execpolicy_for_warnings(&config.config_layer_stack).await {
@@ -559,6 +569,41 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
     })
     .instrument(exec_span)
     .await
+}
+
+async fn build_exec_config<BuildConfig, BuildFuture>(
+    overrides: ConfigOverrides,
+    preserve_headless_approval_policy: bool,
+    build_config: BuildConfig,
+) -> std::io::Result<Config>
+where
+    BuildConfig: Fn(ConfigOverrides) -> BuildFuture,
+    BuildFuture: Future<Output = std::io::Result<Config>>,
+{
+    let build_without_headless_approval_policy = || {
+        build_config(ConfigOverrides {
+            approval_policy: None,
+            ..overrides.clone()
+        })
+    };
+    match build_config(overrides.clone()).await {
+        Ok(config)
+            if config.approvals_reviewer == ApprovalsReviewer::AutoReview
+                && !preserve_headless_approval_policy =>
+        {
+            build_without_headless_approval_policy().await
+        }
+        Ok(config) => Ok(config),
+        Err(headless_error) if !preserve_headless_approval_policy => {
+            match build_without_headless_approval_policy().await {
+                Ok(config) if config.approvals_reviewer == ApprovalsReviewer::AutoReview => {
+                    Ok(config)
+                }
+                Ok(_) | Err(_) => Err(headless_error),
+            }
+        }
+        Err(headless_error) => Err(headless_error),
+    }
 }
 
 async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
