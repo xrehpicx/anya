@@ -2,6 +2,7 @@ mod channel;
 mod codex_rpc;
 mod home;
 mod service;
+mod setup;
 mod whatsapp;
 
 use std::io::BufRead;
@@ -70,6 +71,8 @@ enum CommandKind {
     Logout(LogoutArgs),
     /// Install or print a systemd unit for Anya.
     Service(ServiceArgs),
+    /// Configure Anya's first-run setup state.
+    Setup(setup::SetupArgs),
     /// Install and run the WhatsApp bridge channel.
     Whatsapp(Box<whatsapp::WhatsappArgs>),
     /// Create, list, and bind generalized chat channels to Codex threads.
@@ -345,6 +348,7 @@ async fn run(arg0_paths: Arg0DispatchPaths) -> Result<()> {
         CommandKind::Auth(args) => auth(args).await,
         CommandKind::Logout(args) => logout(args).await,
         CommandKind::Service(args) => service(args).await,
+        CommandKind::Setup(args) => setup::run(args).await,
         CommandKind::Whatsapp(args) => whatsapp::run(*args).await,
         CommandKind::Channel(args) => channel(args).await,
         CommandKind::SessionCreate(args) => session_create(args).await,

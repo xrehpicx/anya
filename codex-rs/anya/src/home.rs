@@ -27,27 +27,30 @@ pub fn ensure_anya_home() -> Result<PathBuf> {
     Ok(anya_home)
 }
 
-fn seed_anya_system_skills(anya_home: &Path) -> Result<()> {
-    let skill_dir = anya_home.join("skills").join("anya-whatsapp");
-    std::fs::create_dir_all(&skill_dir)
-        .with_context(|| format!("create Anya skill dir {}", skill_dir.display()))?;
-    let skill_path = skill_dir.join("SKILL.md");
-    if skill_path.exists()
-        && std::fs::read_to_string(&skill_path).ok().as_deref() == Some(ANYA_WHATSAPP_SKILL)
-    {
-        return Ok(());
-    }
-    std::fs::write(&skill_path, ANYA_WHATSAPP_SKILL)
-        .with_context(|| format!("write {}", skill_path.display()))
-}
-
-fn anya_home_path() -> Result<PathBuf> {
+pub fn anya_home_path() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os(ANYA_HOME_ENV_VAR).filter(|value| !value.is_empty()) {
         return Ok(PathBuf::from(path));
     }
 
     let home = dirs::home_dir().context("resolve home directory")?;
     Ok(home.join(ANYA_HOME_DIR))
+}
+
+fn seed_anya_system_skills(anya_home: &Path) -> Result<()> {
+    seed_anya_system_skill(anya_home, "anya-whatsapp", ANYA_WHATSAPP_SKILL)?;
+    seed_anya_system_skill(anya_home, "anya-setup", ANYA_SETUP_SKILL)
+}
+
+fn seed_anya_system_skill(anya_home: &Path, name: &str, contents: &str) -> Result<()> {
+    let skill_dir = anya_home.join("skills").join(name);
+    std::fs::create_dir_all(&skill_dir)
+        .with_context(|| format!("create Anya skill dir {}", skill_dir.display()))?;
+    let skill_path = skill_dir.join("SKILL.md");
+    if skill_path.exists() && std::fs::read_to_string(&skill_path).ok().as_deref() == Some(contents)
+    {
+        return Ok(());
+    }
+    std::fs::write(&skill_path, contents).with_context(|| format!("write {}", skill_path.display()))
 }
 
 fn migrate_legacy_codex_home(anya_home: &Path) -> Result<()> {
@@ -139,4 +142,32 @@ Use the `anya whatsapp` CLI. These commands talk to the already-running Anya gat
 ## Limits
 
 The bridge can read the recent message log it recorded while connected. It is not a full phone backup extractor and may not have old WhatsApp history from before Anya's bridge observed or sent messages.
+"#;
+
+const ANYA_SETUP_SKILL: &str = r#"---
+name: anya-setup
+description: "Use when setting up Anya for first use, checking whether Anya setup is complete, configuring the default working directory, or deciding where Anya should keep self-iteration instructions."
+metadata:
+  short-description: Configure Anya's first-run setup
+---
+
+# Anya Setup
+
+Use the `anya setup` CLI. It records explicit setup confirmation in Anya home, separate from inferred workspace instructions.
+
+## Commands
+
+- Check setup: `anya setup status --json`
+- Persist setup: `anya setup set --default-workdir "<path>" --self-iteration-file "<path>" --confirm`
+
+## Workflow
+
+1. Run `anya setup status --json` before claiming setup is complete.
+2. If `complete` is false, ask one setup question at a time. Prefer the `inferredDefaultWorkdir` and `inferredSelfIterationFile` values if present, but ask the user to confirm them.
+3. When the user confirms a default work directory and self-iteration file, run `anya setup set --default-workdir ... --self-iteration-file ... --confirm`.
+4. After persisting setup, tell the user the configured paths and continue with their task.
+
+## Defaults
+
+If the user accepts the inferred paths, use them. If there are no inferred paths, suggest `~/anya/projects` for project work and `~/anya/ANYA_SELF_ITERATION.md` for Anya self-iteration instructions.
 "#;
