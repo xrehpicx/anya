@@ -11,6 +11,7 @@ use codex_extension_api::ThreadIdleInput;
 use codex_extension_api::ThreadLifecycleContributor;
 use codex_extension_api::ThreadResumeInput;
 use codex_extension_api::ThreadStartInput;
+use codex_extension_api::ThreadStopInput;
 use codex_extension_api::TokenUsageContributor;
 use codex_extension_api::ToolCallOutcome;
 use codex_extension_api::ToolContributor;
@@ -32,6 +33,7 @@ use codex_protocol::protocol::TokenUsageInfo;
 
 use crate::accounting::BudgetLimitedGoalDisposition;
 use crate::accounting::GoalAccountingState;
+use crate::api::GoalService;
 use crate::events::GoalEventEmitter;
 use crate::metrics::GoalMetrics;
 use crate::runtime::GoalRuntimeConfig;
@@ -57,6 +59,7 @@ pub struct GoalExtension<C> {
     event_emitter: GoalEventEmitter,
     metrics: GoalMetrics,
     thread_manager: Weak<ThreadManager>,
+    goal_service: Arc<GoalService>,
     goals_enabled: Arc<dyn Fn(&C) -> bool + Send + Sync>,
 }
 
@@ -72,6 +75,7 @@ impl<C> GoalExtension<C> {
         event_sink: Arc<dyn ExtensionEventSink>,
         metrics_client: Option<MetricsClient>,
         thread_manager: Weak<ThreadManager>,
+        goal_service: Arc<GoalService>,
         goals_enabled: impl Fn(&C) -> bool + Send + Sync + 'static,
     ) -> Self {
         Self {
@@ -79,6 +83,7 @@ impl<C> GoalExtension<C> {
             event_emitter: GoalEventEmitter::new(event_sink),
             metrics: GoalMetrics::new(metrics_client),
             thread_manager,
+            goal_service,
             goals_enabled: Arc::new(goals_enabled),
         }
     }
@@ -120,6 +125,7 @@ where
             )
         });
         runtime.set_enabled(enabled);
+        self.goal_service.register_runtime(&runtime);
     }
 
     async fn on_thread_resume(&self, input: ThreadResumeInput<'_>) {
@@ -145,6 +151,12 @@ where
                 "failed to continue active goal for idle thread {}: {err}",
                 runtime.thread_id()
             );
+        }
+    }
+
+    async fn on_thread_stop(&self, input: ThreadStopInput<'_>) {
+        if let Some(runtime) = goal_runtime_handle(input.thread_store) {
+            self.goal_service.unregister_runtime(&runtime);
         }
     }
 }
@@ -408,6 +420,7 @@ pub fn install_with_backend<C>(
     state_dbs: Arc<codex_state::StateRuntime>,
     metrics_client: Option<MetricsClient>,
     thread_manager: Weak<ThreadManager>,
+    goal_service: Arc<GoalService>,
     goals_enabled: impl Fn(&C) -> bool + Send + Sync + 'static,
 ) where
     C: Send + Sync + 'static,
@@ -417,6 +430,7 @@ pub fn install_with_backend<C>(
         registry.event_sink(),
         metrics_client,
         thread_manager,
+        Arc::clone(&goal_service),
         goals_enabled,
     ));
     registry.thread_lifecycle_contributor(extension.clone());
