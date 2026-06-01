@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
@@ -10,8 +12,6 @@ use clap::Args;
 use clap::Subcommand;
 use serde::Deserialize;
 use serde::Serialize;
-#[cfg(unix)]
-use std::os::unix::process::ExitStatusExt;
 use tokio::io::AsyncBufReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::io::BufReader;
@@ -303,7 +303,7 @@ pub async fn spawn_gateway_bridge(default_endpoint: &str) -> Result<Option<JoinH
             match spawn_bridge_process(&dir, &anya_binary, &config).await {
                 Ok(mut child) => match child.wait().await {
                     Ok(status) => {
-                        if bridge_was_terminated_for_shutdown(&status) {
+                        if bridge_was_terminated_for_shutdown(status) {
                             eprintln!(
                                 "Anya WhatsApp bridge terminated for shutdown; not restarting"
                             );
@@ -327,10 +327,10 @@ pub async fn spawn_gateway_bridge(default_endpoint: &str) -> Result<Option<JoinH
     Ok(Some(handle))
 }
 
-fn bridge_was_terminated_for_shutdown(status: &std::process::ExitStatus) -> bool {
+fn bridge_was_terminated_for_shutdown(status: std::process::ExitStatus) -> bool {
     #[cfg(unix)]
     {
-        return status.signal() == Some(15);
+        status.signal() == Some(15)
     }
     #[cfg(not(unix))]
     {
