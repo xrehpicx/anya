@@ -1,4 +1,5 @@
 use std::io::Write;
+use std::path::PathBuf;
 
 use anyhow::Context;
 use anyhow::Result;
@@ -86,40 +87,45 @@ impl CodexRpcClient {
         &mut self,
         thread_id: String,
         text: String,
+        images: Vec<PathBuf>,
     ) -> Result<TurnStartResponse> {
         let request_id = self.request_id();
         self.request_typed(ClientRequest::TurnStart {
             request_id,
             params: TurnStartParams {
                 thread_id,
-                input: vec![UserInput::Text {
-                    text,
-                    text_elements: Vec::new(),
-                }],
+                input: turn_input(text, images),
                 ..TurnStartParams::default()
             },
         })
         .await
     }
 
-    pub async fn turn_start_streaming(&mut self, thread_id: String, text: String) -> Result<()> {
-        let response = self.turn_start_collect(thread_id, text).await?;
+    pub async fn turn_start_streaming(
+        &mut self,
+        thread_id: String,
+        text: String,
+        images: Vec<PathBuf>,
+    ) -> Result<()> {
+        let response = self.turn_start_collect(thread_id, text, images).await?;
         let mut stdout = std::io::stdout().lock();
         stdout.write_all(response.as_bytes())?;
         writeln!(stdout)?;
         Ok(())
     }
 
-    pub async fn turn_start_json_stream(&mut self, thread_id: String, text: String) -> Result<()> {
+    pub async fn turn_start_json_stream(
+        &mut self,
+        thread_id: String,
+        text: String,
+        images: Vec<PathBuf>,
+    ) -> Result<()> {
         let request_id = self.request_id();
         let request = ClientRequest::TurnStart {
             request_id: request_id.clone(),
             params: TurnStartParams {
                 thread_id: thread_id.clone(),
-                input: vec![UserInput::Text {
-                    text,
-                    text_elements: Vec::new(),
-                }],
+                input: turn_input(text, images),
                 ..TurnStartParams::default()
             },
         };
@@ -201,16 +207,18 @@ impl CodexRpcClient {
         }
     }
 
-    pub async fn turn_start_collect(&mut self, thread_id: String, text: String) -> Result<String> {
+    pub async fn turn_start_collect(
+        &mut self,
+        thread_id: String,
+        text: String,
+        images: Vec<PathBuf>,
+    ) -> Result<String> {
         let request_id = self.request_id();
         let request = ClientRequest::TurnStart {
             request_id: request_id.clone(),
             params: TurnStartParams {
                 thread_id: thread_id.clone(),
-                input: vec![UserInput::Text {
-                    text,
-                    text_elements: Vec::new(),
-                }],
+                input: turn_input(text, images),
                 ..TurnStartParams::default()
             },
         };
@@ -369,6 +377,18 @@ impl CodexRpcClient {
         self.next_id += 1;
         RequestId::Integer(id)
     }
+}
+
+fn turn_input(text: String, images: Vec<PathBuf>) -> Vec<UserInput> {
+    let mut input = images
+        .into_iter()
+        .map(|path| UserInput::LocalImage { path, detail: None })
+        .collect::<Vec<_>>();
+    input.push(UserInput::Text {
+        text,
+        text_elements: Vec::new(),
+    });
+    input
 }
 
 fn write_json_stream_event(

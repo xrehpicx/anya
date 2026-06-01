@@ -228,6 +228,9 @@ struct SessionSendArgs {
     /// Stream JSON-lines turn events to stdout as the app-server emits them.
     #[arg(long, conflicts_with = "wait")]
     stream_json: bool,
+    /// Attach one or more local image files to this turn.
+    #[arg(long = "image", value_name = "PATH")]
+    images: Vec<PathBuf>,
     #[arg(required = true, trailing_var_arg = true)]
     message: Vec<String>,
 }
@@ -342,7 +345,7 @@ async fn auth_status(args: AuthStatusArgs) -> Result<()> {
     let probe = "Reply exactly: auth-ok".to_string();
     let result = tokio::time::timeout(
         timeout_duration,
-        client.turn_start_collect(thread_id, probe),
+        client.turn_start_collect(thread_id, probe, Vec::new()),
     )
     .await;
     match result {
@@ -454,6 +457,7 @@ async fn session_create(args: SessionCreateArgs) -> Result<()> {
 
 async fn session_send(args: SessionSendArgs) -> Result<()> {
     let message = args.message.join(" ");
+    let images = args.images.clone();
     if let (Some(channel), Some(command)) =
         (args.channel.clone(), parse_channel_slash_command(&message))
     {
@@ -484,7 +488,7 @@ async fn session_send(args: SessionSendArgs) -> Result<()> {
     }
     if args.stream_json {
         match client
-            .turn_start_json_stream(thread_id.clone(), message.clone())
+            .turn_start_json_stream(thread_id.clone(), message.clone(), images.clone())
             .await
         {
             Ok(()) => {}
@@ -493,13 +497,15 @@ async fn session_send(args: SessionSendArgs) -> Result<()> {
                     .as_deref()
                     .context("channel is required for stale thread recovery")?;
                 let thread_id = create_default_channel_thread(&mut client, channel).await?;
-                client.turn_start_json_stream(thread_id, message).await?;
+                client
+                    .turn_start_json_stream(thread_id, message, images)
+                    .await?;
             }
             Err(error) => return Err(error),
         }
     } else if args.wait {
         let response = match client
-            .turn_start_collect(thread_id.clone(), message.clone())
+            .turn_start_collect(thread_id.clone(), message.clone(), images.clone())
             .await
         {
             Ok(response) => response,
@@ -508,20 +514,25 @@ async fn session_send(args: SessionSendArgs) -> Result<()> {
                     .as_deref()
                     .context("channel is required for stale thread recovery")?;
                 let thread_id = create_default_channel_thread(&mut client, channel).await?;
-                client.turn_start_collect(thread_id, message).await?
+                client
+                    .turn_start_collect(thread_id, message, images)
+                    .await?
             }
             Err(error) => return Err(error),
         };
         println!("{response}");
     } else {
-        let response = match client.turn_start(thread_id.clone(), message.clone()).await {
+        let response = match client
+            .turn_start(thread_id.clone(), message.clone(), images.clone())
+            .await
+        {
             Ok(response) => response,
             Err(error) if channel.is_some() && is_thread_not_found_error(&error) => {
                 let channel = channel
                     .as_deref()
                     .context("channel is required for stale thread recovery")?;
                 let thread_id = create_default_channel_thread(&mut client, channel).await?;
-                client.turn_start(thread_id, message).await?
+                client.turn_start(thread_id, message, images).await?
             }
             Err(error) => return Err(error),
         };
@@ -544,10 +555,12 @@ async fn session_send_slash_command(
             if rest.is_empty() {
                 println!("Started a new Anya session for this channel.");
             } else if wait {
-                let response = client.turn_start_collect(thread_id, rest).await?;
+                let response = client
+                    .turn_start_collect(thread_id, rest, Vec::new())
+                    .await?;
                 println!("{response}");
             } else {
-                let response = client.turn_start(thread_id, rest).await?;
+                let response = client.turn_start(thread_id, rest, Vec::new()).await?;
                 serde_json::to_writer_pretty(std::io::stdout(), &response)?;
                 println!();
             }
@@ -669,7 +682,9 @@ async fn chat(args: ChatArgs) -> Result<()> {
                     } else {
                         print!("anya> ");
                         std::io::stdout().flush()?;
-                        client.turn_start_streaming(thread_id.clone(), rest).await?;
+                        client
+                            .turn_start_streaming(thread_id.clone(), rest, Vec::new())
+                            .await?;
                     }
                 }
                 ChannelSlashCommand::Stop => {
@@ -685,7 +700,7 @@ async fn chat(args: ChatArgs) -> Result<()> {
         print!("anya> ");
         std::io::stdout().flush()?;
         match client
-            .turn_start_streaming(thread_id.clone(), message.to_string())
+            .turn_start_streaming(thread_id.clone(), message.to_string(), Vec::new())
             .await
         {
             Ok(()) => {}
@@ -695,7 +710,7 @@ async fn chat(args: ChatArgs) -> Result<()> {
                 store.bind(channel.clone(), thread_id.clone());
                 store.save().await?;
                 client
-                    .turn_start_streaming(thread_id.clone(), message.to_string())
+                    .turn_start_streaming(thread_id.clone(), message.to_string(), Vec::new())
                     .await?;
             }
             Err(error) => return Err(error),

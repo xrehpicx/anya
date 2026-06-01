@@ -580,13 +580,15 @@ const PACKAGE_JSON: &str = r#"{
 
 const BRIDGE_MJS: &str = r#"import makeWASocket, {
   DisconnectReason,
+  downloadContentFromMessage,
   fetchLatestBaileysVersion,
   useMultiFileAuthState,
 } from '@whiskeysockets/baileys';
 import Pino from 'pino';
 import qrcode from 'qrcode-terminal';
 import { spawn } from 'node:child_process';
-import { mkdirSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const anyaBinary = process.env.ANYA_BINARY || 'anya';
@@ -609,9 +611,14 @@ const replyTimeoutMs = parseOptionalTimeout(process.env.ANYA_WHATSAPP_REPLY_TIME
 const sessionDir =
   process.env.ANYA_WHATSAPP_SESSION_DIR ||
   join(process.env.HOME || '.', '.local', 'share', 'anya', 'whatsapp', 'session');
+const mediaDir =
+  process.env.ANYA_WHATSAPP_MEDIA_DIR ||
+  join(process.env.HOME || '.', '.local', 'share', 'anya', 'whatsapp', 'media');
+const maxMediaBytes = parseTimeout(process.env.ANYA_WHATSAPP_MAX_MEDIA_BYTES, 25 * 1024 * 1024);
 const activeRuns = new Map();
 
 mkdirSync(sessionDir, { recursive: true });
+mkdirSync(mediaDir, { recursive: true });
 
 class AnyaRunStoppedError extends Error {
   constructor() {
@@ -864,7 +871,7 @@ async function ensureChannel(remoteJid) {
 }
 
 function extractText(message) {
-  const m = message?.message;
+  const m = messagePayload(message);
   if (!m) return '';
   return (
     m.conversation ||
@@ -874,6 +881,167 @@ function extractText(message) {
     m.documentMessage?.caption ||
     ''
   ).trim();
+}
+
+function messagePayload(message) {
+  let payload = message?.message;
+  for (let i = 0; i < 4; i += 1) {
+    if (payload?.ephemeralMessage?.message) {
+      payload = payload.ephemeralMessage.message;
+    } else if (payload?.viewOnceMessage?.message) {
+      payload = payload.viewOnceMessage.message;
+    } else if (payload?.viewOnceMessageV2?.message) {
+      payload = payload.viewOnceMessageV2.message;
+    } else if (payload?.documentWithCaptionMessage?.message) {
+      payload = payload.documentWithCaptionMessage.message;
+    } else {
+      break;
+    }
+  }
+  return payload || {};
+}
+
+function mediaInfo(message) {
+  const payload = messagePayload(message);
+  if (payload.imageMessage) {
+    return {
+      kind: 'image',
+      downloadType: 'image',
+      content: payload.imageMessage,
+      promptLabel: 'image',
+      imageInput: true,
+    };
+  }
+  if (payload.videoMessage) {
+    return {
+      kind: 'video',
+      downloadType: 'video',
+      content: payload.videoMessage,
+      promptLabel: 'video',
+      imageInput: false,
+    };
+  }
+  if (payload.audioMessage) {
+    return {
+      kind: payload.audioMessage.ptt ? 'voice' : 'audio',
+      downloadType: 'audio',
+      content: payload.audioMessage,
+      promptLabel: payload.audioMessage.ptt ? 'voice note' : 'audio',
+      imageInput: false,
+    };
+  }
+  if (payload.documentMessage) {
+    return {
+      kind: 'document',
+      downloadType: 'document',
+      content: payload.documentMessage,
+      promptLabel: payload.documentMessage.fileName
+        ? `file ${payload.documentMessage.fileName}`
+        : 'file',
+      imageInput: false,
+    };
+  }
+  if (payload.stickerMessage) {
+    return {
+      kind: 'sticker',
+      downloadType: 'sticker',
+      content: payload.stickerMessage,
+      promptLabel: 'sticker',
+      imageInput: false,
+    };
+  }
+  return null;
+}
+
+function safeFileStem(value) {
+  return String(value || '')
+    .trim()
+    .replace(/[^\w.-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80);
+}
+
+function extensionForMime(mimeType, kind) {
+  const mime = String(mimeType || '').split(';')[0].trim().toLowerCase();
+  const known = {
+    'image/jpeg': 'jpg',
+    'image/png': 'png',
+    'image/webp': 'webp',
+    'image/gif': 'gif',
+    'video/mp4': 'mp4',
+    'video/quicktime': 'mov',
+    'audio/ogg': 'ogg',
+    'audio/opus': 'opus',
+    'audio/mpeg': 'mp3',
+    'audio/mp4': 'm4a',
+    'audio/aac': 'aac',
+    'audio/wav': 'wav',
+    'application/pdf': 'pdf',
+    'text/plain': 'txt',
+    'text/csv': 'csv',
+    'application/json': 'json',
+    'application/zip': 'zip',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'pptx',
+    'application/msword': 'doc',
+    'application/vnd.ms-excel': 'xls',
+    'application/vnd.ms-powerpoint': 'ppt',
+  };
+  if (known[mime]) return known[mime];
+  if (kind === 'image') return 'img';
+  if (kind === 'video') return 'video';
+  if (kind === 'audio' || kind === 'voice') return 'audio';
+  if (kind === 'sticker') return 'webp';
+  return 'file';
+}
+
+async function downloadMediaAttachment(message) {
+  const info = mediaInfo(message);
+  if (!info) return null;
+  const stream = await downloadContentFromMessage(info.content, info.downloadType);
+  const chunks = [];
+  let totalBytes = 0;
+  for await (const chunk of stream) {
+    totalBytes += chunk.length;
+    if (totalBytes > maxMediaBytes) {
+      throw new Error(
+        `WhatsApp ${info.promptLabel} exceeds ${Math.round(maxMediaBytes / 1024 / 1024)} MiB`
+      );
+    }
+    chunks.push(chunk);
+  }
+  const mimeType = info.content?.mimetype || 'application/octet-stream';
+  const extension = extensionForMime(mimeType, info.kind);
+  const originalName = info.content?.fileName ? safeFileStem(info.content.fileName) : '';
+  const uniquePrefix = `${Date.now()}-${randomUUID()}`;
+  const displayName = originalName || `${info.kind}.${extension}`;
+  const fileName = displayName.includes('.')
+    ? `${uniquePrefix}-${displayName}`
+    : `${uniquePrefix}-${displayName}.${extension}`;
+  const path = join(mediaDir, fileName);
+  writeFileSync(path, Buffer.concat(chunks));
+  return {
+    ...info,
+    mimeType,
+    path,
+    sizeBytes: totalBytes,
+  };
+}
+
+function promptWithMedia(text, attachment) {
+  if (!attachment) return text;
+  const lines = [];
+  if (text) lines.push(text);
+  lines.push('', 'WhatsApp attachments:');
+  const asImage = attachment.imageInput ? ' Attached as an image input.' : '';
+  lines.push(
+    `- ${attachment.promptLabel}: ${attachment.path} (${attachment.mimeType}, ${attachment.sizeBytes} bytes).${asImage}`
+  );
+  if (!attachment.imageInput) {
+    lines.push('Use local shell tools on the saved file if you need to inspect, transcribe, summarize, convert, or parse it.');
+  }
+  return lines.join('\n').trim();
 }
 
 function isGroup(remoteJid) {
@@ -949,8 +1117,14 @@ function escapeRegex(value) {
 }
 
 function mentionedBot(message, sock) {
-  const mentions =
-    message?.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+  const payload = messagePayload(message);
+  const mentions = [
+    ...(payload.extendedTextMessage?.contextInfo?.mentionedJid || []),
+    ...(payload.imageMessage?.contextInfo?.mentionedJid || []),
+    ...(payload.videoMessage?.contextInfo?.mentionedJid || []),
+    ...(payload.documentMessage?.contextInfo?.mentionedJid || []),
+    ...(payload.audioMessage?.contextInfo?.mentionedJid || []),
+  ];
   const own = sock.user?.id?.split(':')[0];
   return own ? mentions.some((jid) => jid.includes(own)) : false;
 }
@@ -970,8 +1144,8 @@ function stripInvocation(text, message, sock) {
   return trimmed;
 }
 
-function shouldRespond(text, remoteJid, message, sock) {
-  if (!text) return false;
+function shouldRespond(text, remoteJid, message, sock, hasAttachment = false) {
+  if (!text && !hasAttachment) return false;
   if (!isGroup(remoteJid)) return true;
   if (!requireMention) return true;
   const lower = text.toLowerCase();
@@ -1052,6 +1226,7 @@ async function streamPrompt(sock, remoteJid, message, channel, text, options = {
   let flushTimer;
   let sendQueue = Promise.resolve();
   const quoted = Boolean(options.quoted);
+  const images = options.images || [];
 
   const enqueue = (fn) => {
     sendQueue = sendQueue.then(fn, fn);
@@ -1078,15 +1253,19 @@ async function streamPrompt(sock, remoteJid, message, channel, text, options = {
   const presenceInterval = setInterval(sendPresence, 15_000);
   presenceInterval.unref?.();
   try {
-    await streamAnya([
+    const args = [
       'session-send',
       '--endpoint',
       endpoint,
       '--channel',
       channel,
       '--stream-json',
-      text,
-    ], {
+    ];
+    for (const image of images) {
+      args.push('--image', image);
+    }
+    args.push(text);
+    await streamAnya(args, {
       onMessageDelta: (delta) => {
         if (!delta) return;
         buffer += delta;
@@ -1190,12 +1369,14 @@ async function handleMessage(sock, message) {
 
   const rawText = extractText(message);
   const command = parseSlashCommand(rawText);
+  const inboundMedia = mediaInfo(message);
   console.log(JSON.stringify({
     event: 'whatsapp_message',
     remoteJid,
     fromMe: message.key.fromMe,
     isGroup: isGroup(remoteJid),
     command: command?.name || null,
+    mediaKind: inboundMedia?.kind || null,
     textLength: rawText.length,
   }));
   const access = isAllowedInbound(message, remoteJid);
@@ -1217,12 +1398,18 @@ async function handleMessage(sock, message) {
     return;
   }
 
-  if (!shouldRespond(rawText, remoteJid, message, sock)) return;
+  if (!shouldRespond(rawText, remoteJid, message, sock, Boolean(inboundMedia))) return;
 
   const text = stripInvocation(rawText, message, sock);
-  if (!text) return;
+  if (!text && !inboundMedia) return;
 
   try {
+    const attachment = await downloadMediaAttachment(message);
+    const prompt = promptWithMedia(
+      text || `Please inspect this WhatsApp ${attachment?.promptLabel || 'attachment'}.`,
+      attachment
+    );
+    const images = attachment?.imageInput ? [attachment.path] : [];
     const channel = await ensureChannel(remoteJid);
     if (activeRuns.has(channel)) {
       await replyText(
@@ -1234,7 +1421,7 @@ async function handleMessage(sock, message) {
       return;
     }
 
-    await streamPromptWithRecovery(sock, remoteJid, message, channel, text);
+    await streamPromptWithRecovery(sock, remoteJid, message, channel, prompt, { images });
   } catch (error) {
     if (!isStoppedError(error)) {
       console.error(`Anya WhatsApp message error: ${error?.stack || error?.message || error}`);
@@ -1359,5 +1546,26 @@ mod tests {
         assert!(BRIDGE_MJS.contains("ANYA_WHATSAPP_ALLOW_FROM"));
         assert!(BRIDGE_MJS.contains("ANYA_WHATSAPP_BLOCK_FROM"));
         assert!(BRIDGE_MJS.contains("whatsapp_message_dropped"));
+    }
+
+    #[test]
+    fn whatsapp_bridge_downloads_media_attachments() {
+        assert!(BRIDGE_MJS.contains("downloadContentFromMessage"));
+        assert!(BRIDGE_MJS.contains("ANYA_WHATSAPP_MEDIA_DIR"));
+        assert!(BRIDGE_MJS.contains("ANYA_WHATSAPP_MAX_MEDIA_BYTES"));
+        assert!(BRIDGE_MJS.contains("payload.imageMessage"));
+        assert!(BRIDGE_MJS.contains("payload.videoMessage"));
+        assert!(BRIDGE_MJS.contains("payload.audioMessage"));
+        assert!(BRIDGE_MJS.contains("payload.documentMessage"));
+        assert!(BRIDGE_MJS.contains("payload.stickerMessage"));
+        assert!(BRIDGE_MJS.contains("documentWithCaptionMessage"));
+    }
+
+    #[test]
+    fn whatsapp_bridge_passes_images_to_anya() {
+        assert!(BRIDGE_MJS.contains("args.push('--image', image);"));
+        assert!(BRIDGE_MJS.contains("Attached as an image input."));
+        assert!(BRIDGE_MJS.contains("Use local shell tools on the saved file"));
+        assert!(BRIDGE_MJS.contains("mediaKind: inboundMedia?.kind || null"));
     }
 }
