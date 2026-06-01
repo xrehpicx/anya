@@ -165,6 +165,8 @@ enum ServiceCommand {
     Print(ServiceUnitArgs),
     /// Install a systemd unit. Requires permission to write the selected unit path.
     Install(ServiceUnitArgs),
+    /// Safely restart the user systemd service from outside the Anya cgroup.
+    Restart(ServiceRestartArgs),
 }
 
 #[derive(Debug, Args, Clone)]
@@ -181,6 +183,12 @@ struct ServiceUnitArgs {
     user: Option<String>,
     #[arg(long)]
     working_directory: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct ServiceRestartArgs {
+    #[arg(long, default_value = "anya")]
+    name: String,
 }
 
 #[derive(Debug, Args)]
@@ -415,6 +423,9 @@ async fn service(args: ServiceArgs) -> Result<()> {
             Ok(())
         }
         ServiceCommand::Install(unit_args) => service::install_systemd_unit(&unit_args).await,
+        ServiceCommand::Restart(restart_args) => {
+            service::restart_user_systemd_unit(&restart_args.name).await
+        }
     }
 }
 

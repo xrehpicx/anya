@@ -1,6 +1,7 @@
 use anyhow::Context;
 use anyhow::Result;
 use tokio::io::AsyncWriteExt;
+use tokio::process::Command;
 
 use crate::ServiceUnitArgs;
 
@@ -59,6 +60,43 @@ pub async fn install_systemd_unit(args: &ServiceUnitArgs) -> Result<()> {
         .with_context(|| format!("write {}", path.display()))?;
     println!("{}", path.display());
     Ok(())
+}
+
+pub async fn restart_user_systemd_unit(service_name: &str) -> Result<()> {
+    let service_unit = service_unit_name(service_name);
+    let transient_unit = format!("anya-restart-{}", std::process::id());
+    let output = Command::new("systemd-run")
+        .args([
+            "--user",
+            "--unit",
+            &transient_unit,
+            "--collect",
+            "systemctl",
+            "--user",
+            "restart",
+            &service_unit,
+        ])
+        .output()
+        .await
+        .with_context(|| format!("schedule safe restart for {service_unit} with systemd-run"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if stderr.is_empty() { stdout } else { stderr };
+        anyhow::bail!("failed to schedule safe restart for {service_unit}: {detail}");
+    }
+
+    println!("Scheduled safe restart for {service_unit} in {transient_unit}.service");
+    Ok(())
+}
+
+fn service_unit_name(service_name: &str) -> String {
+    if service_name.ends_with(".service") {
+        service_name.to_string()
+    } else {
+        format!("{service_name}.service")
+    }
 }
 
 #[cfg(test)]
@@ -133,5 +171,11 @@ mod tests {
                 "WantedBy=default.target\n",
             )
         );
+    }
+
+    #[test]
+    fn service_unit_name_accepts_bare_name_or_unit() {
+        assert_eq!("anya.service", service_unit_name("anya"));
+        assert_eq!("anya.service", service_unit_name("anya.service"));
     }
 }

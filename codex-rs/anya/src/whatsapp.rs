@@ -413,30 +413,9 @@ fn bridge_command(
     command
 }
 
-async fn run_systemctl(args: &[&str], action: &str) -> Result<()> {
-    let output = Command::new("systemctl")
-        .args(args)
-        .stdin(Stdio::null())
-        .output()
-        .await
-        .with_context(|| format!("{action} with systemctl"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let detail = if stderr.is_empty() { stdout } else { stderr };
-        anyhow::bail!("systemctl failed to {action}: {detail}");
-    }
-    Ok(())
-}
-
 async fn restart_gateway_service(service_name: &str) -> Result<()> {
     let service_unit = service_unit_name(service_name);
-    run_systemctl(
-        &["--user", "restart", &service_unit],
-        "restart Anya service",
-    )
-    .await?;
-    println!("Restarted gateway service: {service_unit}");
+    crate::service::restart_user_systemd_unit(&service_unit).await?;
     Ok(())
 }
 
@@ -490,7 +469,7 @@ fn service_unit_name(service_name: &str) -> String {
 fn print_setup_next_steps(service_name: &str) {
     let service_unit = service_unit_name(service_name);
     println!("Next steps:");
-    println!("  systemctl --user restart {service_unit}");
+    println!("  anya service restart --name {service_unit}");
     println!("  journalctl --user -u {service_unit} -f");
 }
 
