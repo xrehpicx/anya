@@ -10,6 +10,8 @@ use clap::Args;
 use clap::Subcommand;
 use serde::Deserialize;
 use serde::Serialize;
+#[cfg(unix)]
+use std::os::unix::process::ExitStatusExt;
 use tokio::io::AsyncBufReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::io::BufReader;
@@ -301,6 +303,12 @@ pub async fn spawn_gateway_bridge(default_endpoint: &str) -> Result<Option<JoinH
             match spawn_bridge_process(&dir, &anya_binary, &config).await {
                 Ok(mut child) => match child.wait().await {
                     Ok(status) => {
+                        if bridge_was_terminated_for_shutdown(&status) {
+                            eprintln!(
+                                "Anya WhatsApp bridge terminated for shutdown; not restarting"
+                            );
+                            break;
+                        }
                         eprintln!("Anya WhatsApp bridge exited with {status}; restarting in 2s");
                     }
                     Err(error) => {
@@ -313,10 +321,22 @@ pub async fn spawn_gateway_bridge(default_endpoint: &str) -> Result<Option<JoinH
                     eprintln!("Failed to start Anya WhatsApp bridge: {error}; retrying in 2s");
                 }
             }
-            std::thread::sleep(Duration::from_secs(2));
+            tokio::time::sleep(Duration::from_secs(2)).await;
         }
     });
     Ok(Some(handle))
+}
+
+fn bridge_was_terminated_for_shutdown(status: &std::process::ExitStatus) -> bool {
+    #[cfg(unix)]
+    {
+        return status.signal() == Some(15);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = status;
+        false
+    }
 }
 
 async fn install_bridge_files(dir: &std::path::Path, skip_npm_install: bool) -> Result<()> {
@@ -1143,17 +1163,30 @@ print(text)
 
 function promptWithMedia(text, attachment) {
   if (!attachment) return text;
+  if (attachment.transcript) {
+    const lines = [];
+    if (text) lines.push(text, '');
+    lines.push(`WhatsApp ${attachment.promptLabel} transcription:`, attachment.transcript);
+    lines.push(
+      '',
+      `Source ${attachment.promptLabel} file, only if needed: ${attachment.path} (${attachment.mimeType}, ${attachment.sizeBytes} bytes).`
+    );
+    return lines.join('\n').trim();
+  }
+
   const lines = [];
-  if (text) lines.push(text);
+  if (text) {
+    lines.push(text);
+  } else {
+    lines.push(`Please inspect this WhatsApp ${attachment.promptLabel}.`);
+  }
   lines.push('', 'WhatsApp attachments:');
   const asImage = attachment.imageInput ? ' Attached as an image input.' : '';
   lines.push(
     `- ${attachment.promptLabel}: ${attachment.path} (${attachment.mimeType}, ${attachment.sizeBytes} bytes).${asImage}`
   );
   if (!attachment.imageInput) {
-    if (attachment.transcript) {
-      lines.push(`Auto-transcription: ${attachment.transcript}`);
-    } else if (attachment.transcriptionError) {
+    if (attachment.transcriptionError) {
       lines.push(`Auto-transcription failed: ${attachment.transcriptionError}`);
     }
     lines.push('Use local shell tools on the saved file if you need to inspect, transcribe, summarize, convert, or parse it.');
@@ -1418,7 +1451,7 @@ async function streamPromptWithRecovery(sock, remoteJid, message, channel, text,
   }
 }
 
-async function waitForActiveTurnId(channel, timeoutMs = 5_000) {
+async function waitForActiveTurnId(channel, timeoutMs = 60_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const active = activeRuns.get(channel);
@@ -1432,13 +1465,7 @@ async function waitForActiveTurnId(channel, timeoutMs = 5_000) {
 async function steerActiveRun(sock, remoteJid, message, channel, text, options = {}) {
   const turnId = await waitForActiveTurnId(channel);
   if (!turnId) {
-    await replyText(
-      sock,
-      remoteJid,
-      message,
-      'Anya is already replying, but the active turn is not ready for steering yet.',
-      { quoted: true }
-    );
+    console.error(`Anya WhatsApp steer skipped: no active turn id for ${channel}`);
     return;
   }
   const args = [
@@ -1457,7 +1484,12 @@ async function steerActiveRun(sock, remoteJid, message, channel, text, options =
   await runAnya(args, {
     timeoutMs: commandTimeoutMs,
   });
-  await replyText(sock, remoteJid, message, 'Sent to the active Anya turn.', { quoted: true });
+}
+
+function steerActiveRunInBackground(sock, remoteJid, message, channel, text, options = {}) {
+  void steerActiveRun(sock, remoteJid, message, channel, text, options).catch((error) => {
+    console.error(`Anya WhatsApp steer error: ${error?.stack || error?.message || error}`);
+  });
 }
 
 async function handleSlashCommand(sock, remoteJid, message, command) {
@@ -1499,7 +1531,7 @@ async function handleSlashCommand(sock, remoteJid, message, command) {
       }
       await ensureChannel(remoteJid);
       if (activeRuns.has(channel)) {
-        await steerActiveRun(sock, remoteJid, message, channel, command.rest);
+        steerActiveRunInBackground(sock, remoteJid, message, channel, command.rest);
         return true;
       }
       try {
@@ -1565,14 +1597,11 @@ async function handleMessage(sock, message) {
 
   try {
     const attachment = await transcribeAudioAttachment(await downloadMediaAttachment(message));
-    const prompt = promptWithMedia(
-      text || `Please inspect this WhatsApp ${attachment?.promptLabel || 'attachment'}.`,
-      attachment
-    );
+    const prompt = promptWithMedia(text, attachment);
     const images = attachment?.imageInput ? [attachment.path] : [];
     const channel = await ensureChannel(remoteJid);
     if (activeRuns.has(channel)) {
-      await steerActiveRun(sock, remoteJid, message, channel, prompt, { images });
+      steerActiveRunInBackground(sock, remoteJid, message, channel, prompt, { images });
       return;
     }
 
@@ -1710,7 +1739,8 @@ mod tests {
         assert!(BRIDGE_MJS.contains("ANYA_WHATSAPP_MAX_MEDIA_BYTES"));
         assert!(BRIDGE_MJS.contains("ANYA_WHATSAPP_TRANSCRIBE_AUDIO"));
         assert!(BRIDGE_MJS.contains("faster-whisper"));
-        assert!(BRIDGE_MJS.contains("Auto-transcription:"));
+        assert!(BRIDGE_MJS.contains("WhatsApp ${attachment.promptLabel} transcription:"));
+        assert!(BRIDGE_MJS.contains("Source ${attachment.promptLabel} file, only if needed:"));
         assert!(BRIDGE_MJS.contains("payload.imageMessage"));
         assert!(BRIDGE_MJS.contains("payload.videoMessage"));
         assert!(BRIDGE_MJS.contains("payload.audioMessage"));
@@ -1732,6 +1762,7 @@ mod tests {
         assert!(BRIDGE_MJS.contains("session-steer"));
         assert!(BRIDGE_MJS.contains("turn_accepted"));
         assert!(BRIDGE_MJS.contains("waitForActiveTurnId"));
-        assert!(BRIDGE_MJS.contains("Sent to the active Anya turn."));
+        assert!(BRIDGE_MJS.contains("steerActiveRunInBackground"));
+        assert!(!BRIDGE_MJS.contains("Anya is already replying in this channel"));
     }
 }
