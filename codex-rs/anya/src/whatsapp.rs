@@ -1370,7 +1370,7 @@ function parseSlashCommand(text) {
 }
 
 function isChannelSlashCommand(command) {
-  return ['new', 'reset', 'stop', 'status', 'help', 'reply', 'model', 'effort', 'thinking', 'settings'].includes(command?.name);
+  return ['new', 'reset', 'stop', 'status', 'help', 'reply', 'models', 'model', 'effort', 'thinking', 'settings'].includes(command?.name);
 }
 
 function stopActiveRun(channel) {
@@ -1583,6 +1583,15 @@ async function handleSlashCommand(sock, remoteJid, message, command) {
     case 'settings':
       await replyText(sock, remoteJid, message, describeChannelSettings(channel));
       return true;
+    case 'models': {
+      const args = ['models', '--endpoint', endpoint, '--format', 'whatsapp'];
+      if (/\bhidden\b/i.test(command.rest)) args.push('--include-hidden');
+      const modelList = await runAnya(args, {
+        timeoutMs: commandTimeoutMs,
+      });
+      await replyText(sock, remoteJid, message, modelList.trim());
+      return true;
+    }
     case 'model': {
       const value = command.rest.trim();
       if (!value) {
@@ -1639,7 +1648,7 @@ async function handleSlashCommand(sock, remoteJid, message, command) {
         sock,
         remoteJid,
         message,
-        'Anya commands: /new, /reset, /stop, /status, /model, /thinking, /settings, /reply, /help. In groups, mention anya or start with /anya or /ask to chat.'
+        'Anya commands: /new, /reset, /stop, /status, /models, /model, /thinking, /settings, /reply, /help. In groups, mention anya or start with /anya or /ask to chat.'
       );
       return true;
   }
@@ -1807,6 +1816,7 @@ mod tests {
     #[test]
     fn whatsapp_bridge_handles_channel_slash_commands() {
         assert!(BRIDGE_MJS.contains("parseSlashCommand"));
+        assert!(BRIDGE_MJS.contains("'models'"));
         assert!(BRIDGE_MJS.contains("'model'"));
         assert!(BRIDGE_MJS.contains("'thinking'"));
         assert!(BRIDGE_MJS.contains("Started a new Anya session for this channel."));
@@ -1866,6 +1876,7 @@ mod tests {
         assert!(BRIDGE_MJS.contains("function normalizeReasoningEffort"));
         assert!(BRIDGE_MJS.contains("args.push('--model', settings.model)"));
         assert!(BRIDGE_MJS.contains("args.push('--effort', settings.effort)"));
+        assert!(BRIDGE_MJS.contains("'models', '--endpoint', endpoint, '--format', 'whatsapp'"));
         assert!(BRIDGE_MJS.contains("Usage: /model <model-id|default>"));
         assert!(
             BRIDGE_MJS.contains("Usage: /thinking <none|minimal|low|medium|high|xhigh|default>")

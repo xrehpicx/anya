@@ -14,6 +14,7 @@ use anyhow::Result;
 use clap::Args;
 use clap::Parser;
 use clap::Subcommand;
+use clap::ValueEnum;
 use codex_arg0::Arg0DispatchPaths;
 use codex_arg0::arg0_dispatch_or_else;
 use codex_cli::read_access_token_from_stdin;
@@ -38,8 +39,9 @@ use supports_color::Stream;
 
 use crate::channel::ChannelStore;
 use crate::codex_rpc::CodexRpcClient;
+use crate::codex_rpc::ModelVisibility;
 
-const CHANNEL_SLASH_HELP: &str = "Anya commands: /new, /reset, /stop, /status, /help.";
+const CHANNEL_SLASH_HELP: &str = "Anya commands: /new, /reset, /stop, /status, /models, /help.";
 
 fn parse_reasoning_effort(value: &str) -> std::result::Result<ReasoningEffort, String> {
     value.parse()
@@ -79,6 +81,8 @@ enum CommandKind {
     SessionSend(SessionSendArgs),
     /// Steer an active turn in an existing session/thread.
     SessionSteer(SessionSteerArgs),
+    /// List available model IDs from the running Anya gateway.
+    Models(ModelsArgs),
     /// Open an interactive CLI chat bound to a channel.
     Chat(ChatArgs),
     /// Open the Codex TUI for the main Anya session.
@@ -274,6 +278,25 @@ struct SessionSteerArgs {
 }
 
 #[derive(Debug, Args)]
+struct ModelsArgs {
+    #[arg(long, env = "ANYA_ENDPOINT", default_value = "ws://127.0.0.1:4827")]
+    endpoint: String,
+    /// Include models hidden from the default picker.
+    #[arg(long)]
+    include_hidden: bool,
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = ModelsFormat::Text)]
+    format: ModelsFormat,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ModelsFormat {
+    Text,
+    Whatsapp,
+    Json,
+}
+
+#[derive(Debug, Args)]
 struct ChatArgs {
     #[arg(long, env = "ANYA_ENDPOINT", default_value = "ws://127.0.0.1:4827")]
     endpoint: String,
@@ -306,6 +329,7 @@ enum ChannelSlashCommand {
     Reset { rest: String },
     Stop,
     Status,
+    Models,
     Help,
 }
 
@@ -326,6 +350,7 @@ async fn run(arg0_paths: Arg0DispatchPaths) -> Result<()> {
         CommandKind::SessionCreate(args) => session_create(args).await,
         CommandKind::SessionSend(args) => session_send(args).await,
         CommandKind::SessionSteer(args) => session_steer(args).await,
+        CommandKind::Models(args) => models(args).await,
         CommandKind::Chat(args) => chat(args).await,
         CommandKind::Tui(args) => tui(args, arg0_paths).await,
         CommandKind::Rpc(args) => rpc(args).await,
@@ -627,6 +652,74 @@ async fn session_steer(args: SessionSteerArgs) -> Result<()> {
     Ok(())
 }
 
+async fn models(args: ModelsArgs) -> Result<()> {
+    let mut client = CodexRpcClient::connect(&args.endpoint).await?;
+    let visibility = if args.include_hidden {
+        ModelVisibility::IncludeHidden
+    } else {
+        ModelVisibility::Default
+    };
+    let response = client.model_list(visibility).await?;
+    match args.format {
+        ModelsFormat::Json => {
+            serde_json::to_writer_pretty(std::io::stdout(), &response)?;
+            println!();
+        }
+        ModelsFormat::Text => print_model_list(&response.data, ModelListStyle::Text),
+        ModelsFormat::Whatsapp => print_model_list(&response.data, ModelListStyle::Whatsapp),
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ModelListStyle {
+    Text,
+    Whatsapp,
+}
+
+fn print_model_list(models: &[codex_app_server_protocol::Model], style: ModelListStyle) {
+    match style {
+        ModelListStyle::Text => {
+            println!("Available models:");
+            for model in models {
+                println!("{}", format_model_line(model, "-"));
+            }
+            println!(
+                "Use `anya session-send --model <model-id> ...` or WhatsApp `/model <model-id>`."
+            );
+        }
+        ModelListStyle::Whatsapp => {
+            println!("Available models:");
+            for model in models {
+                println!("{}", format_model_line(model, "•"));
+            }
+            println!("Send /model <model-id> to switch this WhatsApp channel.");
+            println!("Send /model default to return to the configured default.");
+        }
+    }
+}
+
+fn format_model_line(model: &codex_app_server_protocol::Model, bullet: &str) -> String {
+    let default_marker = if model.is_default { " (default)" } else { "" };
+    let efforts = model
+        .supported_reasoning_efforts
+        .iter()
+        .map(|effort| effort.reasoning_effort.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    if efforts.is_empty() {
+        format!(
+            "{bullet} {}{default_marker} - {}",
+            model.id, model.display_name
+        )
+    } else {
+        format!(
+            "{bullet} {}{default_marker} - {}; thinking: {efforts}",
+            model.id, model.display_name
+        )
+    }
+}
+
 async fn session_send_slash_command(
     endpoint: &str,
     channel: String,
@@ -662,6 +755,10 @@ async fn session_send_slash_command(
             } else {
                 println!("Channel {channel} is not bound to a session.");
             }
+        }
+        ChannelSlashCommand::Models => {
+            let response = client.model_list(ModelVisibility::Default).await?;
+            print_model_list(&response.data, ModelListStyle::Text);
         }
         ChannelSlashCommand::Help => println!("{CHANNEL_SLASH_HELP}"),
     }
@@ -717,6 +814,7 @@ fn parse_channel_slash_command(message: &str) -> Option<ChannelSlashCommand> {
         "reset" => Some(ChannelSlashCommand::Reset { rest }),
         "stop" => Some(ChannelSlashCommand::Stop),
         "status" => Some(ChannelSlashCommand::Status),
+        "models" => Some(ChannelSlashCommand::Models),
         "help" => Some(ChannelSlashCommand::Help),
         _ => None,
     }
@@ -779,6 +877,11 @@ async fn chat(args: ChatArgs) -> Result<()> {
                 }
                 ChannelSlashCommand::Status => {
                     println!("anya> Channel {channel} is bound to thread {thread_id}.");
+                }
+                ChannelSlashCommand::Models => {
+                    let response = client.model_list(ModelVisibility::Default).await?;
+                    print!("anya> ");
+                    print_model_list(&response.data, ModelListStyle::Text);
                 }
                 ChannelSlashCommand::Help => println!("anya> {CHANNEL_SLASH_HELP}"),
             }
@@ -906,6 +1009,10 @@ mod tests {
             Some(ChannelSlashCommand::Stop),
             parse_channel_slash_command("/stop@anya")
         );
+        assert_eq!(
+            Some(ChannelSlashCommand::Models),
+            parse_channel_slash_command("/models")
+        );
         assert_eq!(None, parse_channel_slash_command("/model gpt-5.5"));
     }
 
@@ -918,6 +1025,19 @@ mod tests {
             }) => {
                 assert_eq!("ws://127.0.0.1:4827", args.endpoint);
                 assert_eq!(45, args.timeout_secs);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_models_command() {
+        let cli = Cli::try_parse_from(["anya", "models", "--format", "whatsapp"]).unwrap();
+        match cli.command {
+            CommandKind::Models(args) => {
+                assert_eq!("ws://127.0.0.1:4827", args.endpoint);
+                assert!(!args.include_hidden);
+                assert!(matches!(args.format, ModelsFormat::Whatsapp));
             }
             other => panic!("unexpected command: {other:?}"),
         }

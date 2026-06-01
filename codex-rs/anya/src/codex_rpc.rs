@@ -7,6 +7,8 @@ use codex_app_server_protocol::AskForApproval;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::JSONRPCMessage;
 use codex_app_server_protocol::JSONRPCRequest;
+use codex_app_server_protocol::ModelListParams;
+use codex_app_server_protocol::ModelListResponse;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::SandboxMode;
 use codex_app_server_protocol::ServerNotification;
@@ -35,9 +37,21 @@ const ANYA_DEVELOPER_INSTRUCTIONS: &str = r#"You are Anya, a coding agent based 
 
 When you are running inside the Anya service and need to restart or update that service, do not run `systemctl --user restart anya.service` directly. Direct restarts from inside `anya.service` are killed with the service cgroup and can leave the service stopped. Use `anya service restart --name anya` instead, or schedule update work in a separate transient user service with `systemd-run --user --collect`."#;
 
+const ANYA_WHATSAPP_CHANNEL_INSTRUCTIONS: &str = r#"When speaking through WhatsApp, users can change Anya channel settings with slash commands. Use `/models` to list available model IDs, `/model <model-id>` to set the current WhatsApp channel model, `/model default` to clear it, `/thinking <none|minimal|low|medium|high|xhigh>` to set reasoning effort, and `/thinking default` to clear it. If a user asks to change model or thinking level from WhatsApp, tell them the exact command to send instead of editing config files by hand."#;
+
+fn anya_developer_instructions() -> String {
+    format!("{ANYA_DEVELOPER_INSTRUCTIONS}\n\n{ANYA_WHATSAPP_CHANNEL_INSTRUCTIONS}")
+}
+
 pub struct CodexRpcClient {
     next_id: i64,
     ws: Ws,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum ModelVisibility {
+    Default,
+    IncludeHidden,
 }
 
 impl CodexRpcClient {
@@ -66,7 +80,7 @@ impl CodexRpcClient {
                 cwd,
                 approval_policy: Some(AskForApproval::Never),
                 sandbox: Some(SandboxMode::DangerFullAccess),
-                developer_instructions: Some(ANYA_DEVELOPER_INSTRUCTIONS.to_string()),
+                developer_instructions: Some(anya_developer_instructions()),
                 ..ThreadStartParams::default()
             },
         })
@@ -81,7 +95,7 @@ impl CodexRpcClient {
                 thread_id,
                 approval_policy: Some(AskForApproval::Never),
                 sandbox: Some(SandboxMode::DangerFullAccess),
-                developer_instructions: Some(ANYA_DEVELOPER_INSTRUCTIONS.to_string()),
+                developer_instructions: Some(anya_developer_instructions()),
                 ..ThreadResumeParams::default()
             },
         })
@@ -125,6 +139,18 @@ impl CodexRpcClient {
                 input: turn_input(text, images),
                 expected_turn_id,
                 ..TurnSteerParams::default()
+            },
+        })
+        .await
+    }
+
+    pub async fn model_list(&mut self, visibility: ModelVisibility) -> Result<ModelListResponse> {
+        let request_id = self.request_id();
+        self.request_typed(ClientRequest::ModelList {
+            request_id,
+            params: ModelListParams {
+                include_hidden: Some(matches!(visibility, ModelVisibility::IncludeHidden)),
+                ..ModelListParams::default()
             },
         })
         .await
