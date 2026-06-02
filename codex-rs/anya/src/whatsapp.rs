@@ -834,6 +834,7 @@ const messageLogPath =
   join(process.env.HOME || '.', '.local', 'share', 'anya', 'whatsapp', 'message-log.json');
 const historySyncWaitMs = parseTimeout(process.env.ANYA_WHATSAPP_HISTORY_SYNC_WAIT_MS, 12_000);
 const maxMediaBytes = parseTimeout(process.env.ANYA_WHATSAPP_MAX_MEDIA_BYTES, 25 * 1024 * 1024);
+const streamReplies = parseBoolEnv(process.env.ANYA_WHATSAPP_STREAM_REPLIES, false);
 const activeRuns = new Map();
 const knownContacts = new Map();
 const knownChats = new Map();
@@ -2272,6 +2273,7 @@ async function streamPrompt(sock, remoteJid, message, channel, text, options = {
       onMessageDelta: (delta) => {
         if (!delta) return;
         buffer += delta;
+        if (!streamReplies) return;
         if (shouldFlushText(buffer, delta)) flush();
         else scheduleFlush();
       },
@@ -2852,6 +2854,10 @@ mod tests {
         assert!(BRIDGE_MJS.contains("streamPromptWithRecovery"));
         assert!(BRIDGE_MJS.contains("--stream-json"));
         assert!(BRIDGE_MJS.contains("{ quoted }"));
+        assert!(BRIDGE_MJS.contains("ANYA_WHATSAPP_STREAM_REPLIES"));
+        assert!(
+            BRIDGE_MJS.contains("parseBoolEnv(process.env.ANYA_WHATSAPP_STREAM_REPLIES, false)")
+        );
     }
 
     #[test]
