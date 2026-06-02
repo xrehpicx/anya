@@ -12,6 +12,7 @@ use anyhow::Context;
 use anyhow::Result;
 use clap::Args;
 use clap::Subcommand;
+use clap::ValueEnum;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::io::AsyncBufReadExt;
@@ -166,9 +167,38 @@ struct WhatsappSendArgs {
     /// Keep inbound handling open for this peer after sending.
     #[arg(long, default_value_t = 0)]
     listen_secs: u64,
-    /// Message text to send.
-    #[arg(required = true, trailing_var_arg = true)]
+    /// Attach one or more local files/media items to send.
+    #[arg(long = "file", value_name = "PATH")]
+    files: Vec<PathBuf>,
+    /// How to send attached files. Auto infers from file extension.
+    #[arg(long, value_enum, default_value = "auto")]
+    media_kind: WhatsappMediaKind,
+    /// Message text to send, or caption for the first attached file.
+    #[arg(trailing_var_arg = true)]
     message: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum WhatsappMediaKind {
+    Auto,
+    Document,
+    Image,
+    Video,
+    Audio,
+    Voice,
+}
+
+impl WhatsappMediaKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Document => "document",
+            Self::Image => "image",
+            Self::Video => "video",
+            Self::Audio => "audio",
+            Self::Voice => "voice",
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -185,6 +215,12 @@ struct WhatsappReadArgs {
     chat: String,
     #[arg(long, default_value_t = 20)]
     limit: u32,
+    /// Optional WhatsApp message ID to locate in recorded/synced chat history.
+    #[arg(long)]
+    message_id: Option<String>,
+    /// Number of messages on each side to return when --message-id is found.
+    #[arg(long, default_value_t = 10)]
+    around: u32,
 }
 
 #[derive(Debug, Args)]
@@ -611,13 +647,28 @@ fn control_socket_path(dir: &std::path::Path) -> PathBuf {
 }
 
 async fn whatsapp_send(args: WhatsappSendArgs) -> Result<()> {
-    if args.message.is_empty() {
-        anyhow::bail!("message must not be empty");
+    let text = args.message.join(" ");
+    if text.trim().is_empty() && args.files.is_empty() {
+        anyhow::bail!("message or --file must not be empty");
     }
+    let attachments = args
+        .files
+        .iter()
+        .map(|path| {
+            let path_text = path.to_str().with_context(|| {
+                format!("attachment path is not valid UTF-8: {}", path.display())
+            })?;
+            Ok(serde_json::json!({
+                "path": path_text,
+                "mediaKind": args.media_kind.as_str(),
+            }))
+        })
+        .collect::<Result<Vec<_>>>()?;
     let response = whatsapp_control_request(serde_json::json!({
         "action": "send",
         "to": args.to,
-        "text": args.message.join(" "),
+        "text": text,
+        "attachments": attachments,
         "listenSecs": args.listen_secs,
     }))?;
     print_control_response(response)
@@ -636,6 +687,8 @@ async fn whatsapp_read(args: WhatsappReadArgs) -> Result<()> {
         "action": "read",
         "chat": args.chat,
         "limit": args.limit,
+        "messageId": args.message_id,
+        "around": args.around,
     }))?;
     print_control_response(response)
 }
@@ -733,10 +786,10 @@ import Pino from 'pino';
 import qrcode from 'qrcode-terminal';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { accessSync, constants as fsConstants, existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, extname, join } from 'node:path';
 
 const anyaBinary = process.env.ANYA_BINARY || 'anya';
 const endpoint = process.env.ANYA_ENDPOINT || 'ws://127.0.0.1:4827';
@@ -1226,7 +1279,9 @@ function compactMessage(message) {
   const fromMe = Boolean(message?.key?.fromMe);
   const text = extractText(message);
   const timestamp = Number(message?.messageTimestamp || 0) || Math.floor(Date.now() / 1000);
-  return {
+  const quoted = quotedMessageReference(message);
+  const media = mediaInfo(message);
+  const entry = {
     id: message?.key?.id || null,
     jid: remoteJid,
     name: displayNameForJid(remoteJid),
@@ -1234,8 +1289,15 @@ function compactMessage(message) {
     participant: message?.key?.participant || null,
     timestamp,
     text,
-    hasMedia: Boolean(mediaInfo(message)),
+    hasMedia: Boolean(media),
   };
+  if (media?.kind) entry.mediaKind = media.kind;
+  if (quoted?.messageId) {
+    entry.quotedMessageId = quoted.messageId;
+    entry.quotedChat = quoted.chat;
+    entry.quotedParticipant = quoted.participant;
+  }
+  return entry;
 }
 
 function recordMessage(message) {
@@ -1253,6 +1315,41 @@ function recordMessage(message) {
 function oldestRecordedMessage(jid) {
   const list = Array.isArray(messageLog[jid]) ? messageLog[jid] : [];
   return list.find((entry) => entry?.id && Number.isFinite(Number(entry.timestamp))) || null;
+}
+
+function recordedMessages(jid) {
+  return Array.isArray(messageLog[jid]) ? messageLog[jid] : [];
+}
+
+function findRecordedMessage(jid, messageId) {
+  const id = String(messageId || '').trim();
+  if (!id) return null;
+  return recordedMessages(jid).find((entry) => entry?.id === id) || null;
+}
+
+function recordedMessageWindow(jid, messageId, around) {
+  const id = String(messageId || '').trim();
+  if (!id) return null;
+  const messages = recordedMessages(jid);
+  const index = messages.findIndex((entry) => entry?.id === id);
+  const parsedAround = Number.parseInt(around || 10, 10);
+  const radius = Math.max(0, Math.min(Number.isFinite(parsedAround) ? parsedAround : 10, 50));
+  if (index === -1) {
+    return {
+      messageId: id,
+      found: false,
+      around: radius,
+      messages: [],
+      detail: 'message id is not in the bridge recorded history for this chat',
+    };
+  }
+  return {
+    messageId: id,
+    found: true,
+    around: radius,
+    index,
+    messages: messages.slice(Math.max(0, index - radius), index + radius + 1),
+  };
 }
 
 function waitForHistoryMessages(jid, beforeCount) {
@@ -1342,12 +1439,134 @@ function hasTemporaryInboundAllow(remoteJid) {
   return true;
 }
 
-async function sendOutboundMessage(sock, to, text, listenSecs = 0) {
-  const jid = resolvePeer(to);
-  if (!text.trim()) throw new Error('message text must not be empty');
-  const result = await sock.sendMessage(jid, { text });
-  rememberChat(jid, { lastMessageAt: Math.floor(Date.now() / 1000) });
-  const entry = {
+function appendMessageLog(jid, entry) {
+  const list = Array.isArray(messageLog[jid]) ? messageLog[jid] : [];
+  list.push(entry);
+  messageLog[jid] = list.slice(-100);
+  saveMessageLog();
+}
+
+function normalizeOutboundMediaKind(value) {
+  const kind = String(value || 'auto').trim().toLowerCase();
+  if (['auto', 'document', 'image', 'video', 'audio', 'voice'].includes(kind)) return kind;
+  throw new Error(`invalid outbound media kind: ${value}`);
+}
+
+function outboundMimeTypeForPath(path) {
+  const extension = extname(path).toLowerCase();
+  const known = {
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.png': 'image/png',
+    '.webp': 'image/webp',
+    '.gif': 'image/gif',
+    '.mp4': 'video/mp4',
+    '.mov': 'video/quicktime',
+    '.m4v': 'video/mp4',
+    '.ogg': 'audio/ogg',
+    '.opus': 'audio/ogg',
+    '.mp3': 'audio/mpeg',
+    '.m4a': 'audio/mp4',
+    '.aac': 'audio/aac',
+    '.wav': 'audio/wav',
+    '.pdf': 'application/pdf',
+    '.txt': 'text/plain',
+    '.csv': 'text/csv',
+    '.json': 'application/json',
+    '.zip': 'application/zip',
+    '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    '.doc': 'application/msword',
+    '.xls': 'application/vnd.ms-excel',
+    '.ppt': 'application/vnd.ms-powerpoint',
+  };
+  return known[extension] || 'application/octet-stream';
+}
+
+function inferOutboundMediaKind(path, requestedKind, mimeType) {
+  const kind = normalizeOutboundMediaKind(requestedKind);
+  if (kind !== 'auto') return kind;
+  const mime = String(mimeType || outboundMimeTypeForPath(path)).toLowerCase();
+  if (mime.startsWith('image/')) return 'image';
+  if (mime.startsWith('video/')) return 'video';
+  if (mime.startsWith('audio/')) return 'audio';
+  return 'document';
+}
+
+function validateOutboundAttachment(attachment) {
+  const path = String(attachment?.path || '').trim();
+  if (!path) throw new Error('attachment path must not be empty');
+  let stat;
+  try {
+    stat = statSync(path);
+    accessSync(path, fsConstants.R_OK);
+  } catch (error) {
+    throw new Error(`cannot read attachment ${path}: ${error?.message || error}`);
+  }
+  if (!stat.isFile()) throw new Error(`attachment is not a regular file: ${path}`);
+  if (stat.size > maxMediaBytes) {
+    throw new Error(
+      `attachment ${path} exceeds ${Math.round(maxMediaBytes / 1024 / 1024)} MiB`
+    );
+  }
+  const mimeType = outboundMimeTypeForPath(path);
+  const mediaKind = inferOutboundMediaKind(path, attachment?.mediaKind, mimeType);
+  return {
+    path,
+    mediaKind,
+    mimeType,
+    fileName: safeFileStem(basename(path)) || 'file',
+    sizeBytes: stat.size,
+  };
+}
+
+function mediaKindSupportsCaption(mediaKind) {
+  return ['document', 'image', 'video'].includes(mediaKind);
+}
+
+async function sendOutboundAttachment(sock, jid, attachment, caption) {
+  const content = (() => {
+    switch (attachment.mediaKind) {
+      case 'image':
+        return {
+          image: { url: attachment.path },
+          mimetype: attachment.mimeType,
+          ...(caption ? { caption } : {}),
+        };
+      case 'video':
+        return {
+          video: { url: attachment.path },
+          mimetype: attachment.mimeType,
+          ...(caption ? { caption } : {}),
+        };
+      case 'audio':
+        return {
+          audio: { url: attachment.path },
+          mimetype: attachment.mimeType,
+        };
+      case 'voice':
+        return {
+          audio: { url: attachment.path },
+          mimetype: attachment.mimeType,
+          ptt: true,
+        };
+      case 'document':
+        return {
+          document: { url: attachment.path },
+          mimetype: attachment.mimeType,
+          fileName: attachment.fileName,
+          ...(caption ? { caption } : {}),
+        };
+      default:
+        throw new Error(`unsupported outbound media kind: ${attachment.mediaKind}`);
+    }
+  })();
+  return sock.sendMessage(jid, content);
+}
+
+function outboundLogBase(jid, result, text) {
+  return {
     id: result?.key?.id || null,
     jid,
     name: displayNameForJid(jid),
@@ -1355,24 +1574,83 @@ async function sendOutboundMessage(sock, to, text, listenSecs = 0) {
     participant: null,
     timestamp: Math.floor(Date.now() / 1000),
     text,
-    hasMedia: false,
   };
-  const list = Array.isArray(messageLog[jid]) ? messageLog[jid] : [];
-  list.push(entry);
-  messageLog[jid] = list.slice(-100);
-  saveMessageLog();
-  const listeningUntil = openTemporaryInbound(jid, listenSecs);
-  return { jid, messageId: entry.id, listeningUntil };
 }
 
-async function readRecordedMessages(sock, chat, limit) {
+async function sendOutboundText(sock, jid, text) {
+  const result = await sock.sendMessage(jid, { text });
+  const entry = {
+    ...outboundLogBase(jid, result, text),
+    hasMedia: false,
+  };
+  appendMessageLog(jid, entry);
+  return entry;
+}
+
+async function sendOutboundMessage(sock, to, text, listenSecs = 0, attachments = []) {
+  const jid = resolvePeer(to);
+  const captionText = String(text || '').trim();
+  const outboundAttachments = (attachments || []).map(validateOutboundAttachment);
+  if (!captionText && outboundAttachments.length === 0) {
+    throw new Error('message text or attachment must not be empty');
+  }
+  rememberChat(jid, { lastMessageAt: Math.floor(Date.now() / 1000) });
+  const entries = [];
+  if (outboundAttachments.length === 0) {
+    entries.push(await sendOutboundText(sock, jid, captionText));
+  } else {
+    let captionConsumed = false;
+    if (captionText && !mediaKindSupportsCaption(outboundAttachments[0].mediaKind)) {
+      entries.push(await sendOutboundText(sock, jid, captionText));
+      captionConsumed = true;
+    }
+    for (const [index, attachment] of outboundAttachments.entries()) {
+      const caption =
+        index === 0 && captionText && !captionConsumed && mediaKindSupportsCaption(attachment.mediaKind)
+          ? captionText
+          : '';
+      const result = await sendOutboundAttachment(sock, jid, attachment, caption);
+      const entry = {
+        ...outboundLogBase(jid, result, caption),
+        hasMedia: true,
+        mediaKind: attachment.mediaKind,
+        fileName: attachment.fileName,
+        mimeType: attachment.mimeType,
+        sizeBytes: attachment.sizeBytes,
+        path: attachment.path,
+      };
+      appendMessageLog(jid, entry);
+      entries.push(entry);
+      if (caption) captionConsumed = true;
+    }
+  }
+  const listeningUntil = openTemporaryInbound(jid, listenSecs);
+  return {
+    jid,
+    messageId: entries[0]?.id || null,
+    messageIds: entries.map((entry) => entry.id).filter(Boolean),
+    attachments: outboundAttachments,
+    listeningUntil,
+  };
+}
+
+async function readRecordedMessages(sock, chat, limit, messageId = null, around = 10) {
   const jid = resolvePeer(chat);
   const count = Math.max(1, Math.min(Number.parseInt(limit || 20, 10) || 20, 100));
   const sync = await syncChatHistory(sock, jid, count);
+  if (messageId) {
+    const window = recordedMessageWindow(jid, messageId, around);
+    return {
+      jid,
+      sync,
+      match: window,
+      messages: window?.found ? window.messages : recordedMessages(jid).slice(-count),
+    };
+  }
   return {
     jid,
     sync,
-    messages: (messageLog[jid] || []).slice(-count),
+    messages: recordedMessages(jid).slice(-count),
   };
 }
 
@@ -1490,6 +1768,65 @@ function mediaInfo(message) {
     };
   }
   return null;
+}
+
+function contextInfoForMessage(message) {
+  const payload = messagePayload(message);
+  return (
+    payload.extendedTextMessage?.contextInfo ||
+    payload.imageMessage?.contextInfo ||
+    payload.videoMessage?.contextInfo ||
+    payload.documentMessage?.contextInfo ||
+    payload.audioMessage?.contextInfo ||
+    payload.stickerMessage?.contextInfo ||
+    null
+  );
+}
+
+function quotedMessageReference(message) {
+  const contextInfo = contextInfoForMessage(message);
+  if (!contextInfo?.stanzaId && !contextInfo?.quotedMessage) return null;
+  return {
+    chat: contextInfo.remoteJid || message?.key?.remoteJid || null,
+    messageId: contextInfo.stanzaId || null,
+    participant: contextInfo.participant || null,
+    quotedMessage: contextInfo.quotedMessage || null,
+  };
+}
+
+function truncateForPrompt(value, maxLength = 1200) {
+  const text = String(value || '').trim();
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, maxLength - 1)}…`;
+}
+
+function quotedMessageContext(message) {
+  const reference = quotedMessageReference(message);
+  if (!reference) return null;
+  const quotedMessage = reference.quotedMessage
+    ? {
+        key: {
+          remoteJid: reference.chat,
+          id: reference.messageId,
+          participant: reference.participant || undefined,
+        },
+        message: reference.quotedMessage,
+      }
+    : null;
+  const embeddedText = quotedMessage ? extractText(quotedMessage) : '';
+  const embeddedMedia = quotedMessage ? mediaInfo(quotedMessage) : null;
+  const recorded = reference.chat && reference.messageId
+    ? findRecordedMessage(reference.chat, reference.messageId)
+    : null;
+  return {
+    ...reference,
+    embedded: Boolean(reference.quotedMessage),
+    text: embeddedText || recorded?.text || '',
+    mediaKind: embeddedMedia?.kind || recorded?.mediaKind || (recorded?.hasMedia ? 'media' : null),
+    recorded: Boolean(recorded),
+    fromMe: recorded?.fromMe ?? null,
+    timestamp: recorded?.timestamp ?? null,
+  };
 }
 
 function safeFileStem(value) {
@@ -1656,6 +1993,36 @@ function promptWithMedia(text, attachment) {
       lines.push(`Auto-transcription failed: ${attachment.transcriptionError}`);
     }
     lines.push('Use local shell tools on the saved file if you need to inspect, transcribe, summarize, convert, or parse it.');
+  }
+  return lines.join('\n').trim();
+}
+
+function promptWithQuotedMessageContext(text, quote) {
+  if (!quote) return text;
+  const lines = [];
+  if (text) lines.push(text, '');
+  lines.push('WhatsApp reply context:');
+  if (quote.messageId) {
+    lines.push(`- User replied to WhatsApp message id: ${quote.messageId}`);
+  } else {
+    lines.push('- User replied to a WhatsApp message with no message id in the event.');
+  }
+  if (quote.chat) lines.push(`- Quoted chat: ${quote.chat}`);
+  if (quote.participant) lines.push(`- Quoted participant: ${quote.participant}`);
+  if (quote.timestamp) lines.push(`- Recorded quoted timestamp: ${quote.timestamp}`);
+  if (quote.fromMe !== null) lines.push(`- Recorded quoted fromMe: ${quote.fromMe}`);
+  if (quote.embedded) {
+    lines.push('- Quoted payload was embedded in this WhatsApp event.');
+  } else {
+    lines.push('- Quoted payload was not embedded in this WhatsApp event; it may be old or unavailable from WhatsApp.');
+  }
+  if (quote.text) lines.push(`- Quoted text: ${truncateForPrompt(quote.text)}`);
+  if (quote.mediaKind) lines.push(`- Quoted media kind: ${quote.mediaKind}`);
+  if (quote.recorded) lines.push('- Quoted message was found in Anya recorded WhatsApp history.');
+  if (quote.chat && quote.messageId) {
+    lines.push(
+      `- To fetch recorded/synced messages around it, run: anya whatsapp read --chat "${quote.chat}" --message-id "${quote.messageId}" --around 10`
+    );
   }
   return lines.join('\n').trim();
 }
@@ -1840,6 +2207,17 @@ function shouldFlushText(buffer, delta) {
   );
 }
 
+function promptWithWhatsappContext(remoteJid, text) {
+  const displayName = displayNameForJid(remoteJid);
+  return [
+    `WhatsApp chat context: current chat JID is ${remoteJid}; display name is ${displayName}.`,
+    `To send a file or media item back to this exact chat, run: anya whatsapp send --to "${remoteJid}" --file "/path/to/file" "optional caption".`,
+    'Use --media-kind document|image|video|audio|voice only when auto-detection is wrong. Confirm before sending sensitive files or sending files to a third party.',
+    '',
+    text,
+  ].join('\n').trim();
+}
+
 async function streamPrompt(sock, remoteJid, message, channel, text, options = {}) {
   let buffer = '';
   let flushTimer;
@@ -1889,7 +2267,7 @@ async function streamPrompt(sock, remoteJid, message, channel, text, options = {
     }
     if (settings.model) args.push('--model', settings.model);
     if (settings.effort) args.push('--effort', settings.effort);
-    args.push(text);
+    args.push(promptWithWhatsappContext(remoteJid, text));
     await streamAnya(args, {
       onMessageDelta: (delta) => {
         if (!delta) return;
@@ -1955,7 +2333,7 @@ async function steerActiveRun(sock, remoteJid, message, channel, text, options =
   for (const image of options.images || []) {
     args.push('--image', image);
   }
-  args.push(text);
+  args.push(promptWithWhatsappContext(remoteJid, text));
   await runAnya(args, {
     timeoutMs: commandTimeoutMs,
   });
@@ -2118,7 +2496,10 @@ async function handleMessage(sock, message) {
 
   try {
     const attachment = await transcribeAudioAttachment(await downloadMediaAttachment(message));
-    const prompt = promptWithMedia(text, attachment);
+    const prompt = promptWithQuotedMessageContext(
+      promptWithMedia(text, attachment),
+      quotedMessageContext(message)
+    );
     const images = attachment?.imageInput ? [attachment.path] : [];
     const channel = await ensureChannel(remoteJid);
     if (activeRuns.has(channel)) {
@@ -2254,13 +2635,25 @@ async function handleControlLine(sock, connection, line) {
     let data;
     switch (request.action) {
       case 'send':
-        data = await sendOutboundMessage(sock, request.to, String(request.text || ''), request.listenSecs);
+        data = await sendOutboundMessage(
+          sock,
+          request.to,
+          String(request.text || ''),
+          request.listenSecs,
+          request.attachments || []
+        );
         break;
       case 'contacts':
         data = { contacts: listKnownContacts(request.query) };
         break;
       case 'read':
-        data = await readRecordedMessages(sock, request.chat, request.limit);
+        data = await readRecordedMessages(
+          sock,
+          request.chat,
+          request.limit,
+          request.messageId,
+          request.around
+        );
         break;
       case 'listen': {
         const jid = resolvePeer(request.chat);
@@ -2291,7 +2684,11 @@ start().catch((error) => {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
     use pretty_assertions::assert_eq;
+
+    use crate::Cli;
+    use crate::CommandKind;
 
     #[test]
     fn service_unit_name_accepts_bare_name_or_unit() {
@@ -2310,6 +2707,130 @@ mod tests {
     #[test]
     fn rejects_short_pair_phone_number() {
         assert!(normalize_pair_phone_number(Some("+12".to_string())).is_err());
+    }
+
+    #[test]
+    fn parses_text_only_whatsapp_send() {
+        let cli =
+            Cli::try_parse_from(["anya", "whatsapp", "send", "--to", "+15551234567", "hello"])
+                .unwrap();
+        match cli.command {
+            CommandKind::Whatsapp(args) => match args.command {
+                WhatsappCommand::Send(args) => {
+                    assert_eq!("+15551234567", args.to);
+                    assert_eq!(Vec::<PathBuf>::new(), args.files);
+                    assert_eq!(WhatsappMediaKind::Auto, args.media_kind);
+                    assert_eq!(vec!["hello"], args.message);
+                }
+                other => panic!("unexpected WhatsApp command: {other:?}"),
+            },
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_media_only_whatsapp_send() {
+        let cli = Cli::try_parse_from([
+            "anya",
+            "whatsapp",
+            "send",
+            "--to",
+            "me",
+            "--file",
+            "/tmp/report.pdf",
+        ])
+        .unwrap();
+        match cli.command {
+            CommandKind::Whatsapp(args) => match args.command {
+                WhatsappCommand::Send(args) => {
+                    assert_eq!("me", args.to);
+                    assert_eq!(vec![PathBuf::from("/tmp/report.pdf")], args.files);
+                    assert_eq!(WhatsappMediaKind::Auto, args.media_kind);
+                    assert!(args.message.is_empty());
+                }
+                other => panic!("unexpected WhatsApp command: {other:?}"),
+            },
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_whatsapp_send_files_caption_and_media_kind() {
+        let cli = Cli::try_parse_from([
+            "anya",
+            "whatsapp",
+            "send",
+            "--to",
+            "me",
+            "--file",
+            "/tmp/a.png",
+            "--file",
+            "/tmp/b.txt",
+            "--media-kind",
+            "document",
+            "caption",
+            "text",
+        ])
+        .unwrap();
+        match cli.command {
+            CommandKind::Whatsapp(args) => match args.command {
+                WhatsappCommand::Send(args) => {
+                    assert_eq!(
+                        vec![PathBuf::from("/tmp/a.png"), PathBuf::from("/tmp/b.txt")],
+                        args.files
+                    );
+                    assert_eq!(WhatsappMediaKind::Document, args.media_kind);
+                    assert_eq!(vec!["caption", "text"], args.message);
+                }
+                other => panic!("unexpected WhatsApp command: {other:?}"),
+            },
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_whatsapp_media_kind() {
+        assert!(
+            Cli::try_parse_from([
+                "anya",
+                "whatsapp",
+                "send",
+                "--to",
+                "me",
+                "--file",
+                "/tmp/a.png",
+                "--media-kind",
+                "invalid",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn parses_whatsapp_read_message_context_options() {
+        let cli = Cli::try_parse_from([
+            "anya",
+            "whatsapp",
+            "read",
+            "--chat",
+            "275397782540416@lid",
+            "--message-id",
+            "3EB0C8811D0D71FD1EA083",
+            "--around",
+            "12",
+        ])
+        .unwrap();
+        match cli.command {
+            CommandKind::Whatsapp(args) => match args.command {
+                WhatsappCommand::Read(args) => {
+                    assert_eq!("275397782540416@lid", args.chat);
+                    assert_eq!(Some("3EB0C8811D0D71FD1EA083".to_string()), args.message_id);
+                    assert_eq!(12, args.around);
+                }
+                other => panic!("unexpected WhatsApp command: {other:?}"),
+            },
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 
     #[test]
@@ -2399,6 +2920,39 @@ mod tests {
         assert!(BRIDGE_MJS.contains("listKnownContacts"));
         assert!(BRIDGE_MJS.contains("temporaryInboundAllows"));
         assert!(BRIDGE_MJS.contains("messaging-history.set"));
+    }
+
+    #[test]
+    fn whatsapp_bridge_sends_outbound_media_attachments() {
+        assert!(BRIDGE_MJS.contains("attachments"));
+        assert!(BRIDGE_MJS.contains("function sendOutboundAttachment"));
+        assert!(BRIDGE_MJS.contains("function inferOutboundMediaKind"));
+        assert!(BRIDGE_MJS.contains("function outboundMimeTypeForPath"));
+        assert!(BRIDGE_MJS.contains("statSync(path)"));
+        assert!(BRIDGE_MJS.contains("accessSync(path, fsConstants.R_OK)"));
+        assert!(BRIDGE_MJS.contains("image: { url: attachment.path }"));
+        assert!(BRIDGE_MJS.contains("video: { url: attachment.path }"));
+        assert!(BRIDGE_MJS.contains("audio: { url: attachment.path }"));
+        assert!(BRIDGE_MJS.contains("document: { url: attachment.path }"));
+        assert!(BRIDGE_MJS.contains("ptt: true"));
+        assert!(BRIDGE_MJS.contains("mediaKind: attachment.mediaKind"));
+        assert!(BRIDGE_MJS.contains("sizeBytes: attachment.sizeBytes"));
+        assert!(BRIDGE_MJS.contains("promptWithWhatsappContext"));
+        assert!(BRIDGE_MJS.contains("--file \"/path/to/file\""));
+    }
+
+    #[test]
+    fn whatsapp_bridge_includes_quoted_message_context() {
+        assert!(BRIDGE_MJS.contains("function contextInfoForMessage"));
+        assert!(BRIDGE_MJS.contains("function quotedMessageReference"));
+        assert!(BRIDGE_MJS.contains("contextInfo.quotedMessage"));
+        assert!(BRIDGE_MJS.contains("contextInfo.stanzaId"));
+        assert!(BRIDGE_MJS.contains("quotedMessageId"));
+        assert!(BRIDGE_MJS.contains("WhatsApp reply context:"));
+        assert!(BRIDGE_MJS.contains("Quoted payload was not embedded"));
+        assert!(BRIDGE_MJS.contains("--message-id"));
+        assert!(BRIDGE_MJS.contains("function recordedMessageWindow"));
+        assert!(BRIDGE_MJS.contains("request.messageId"));
     }
 
     #[test]
