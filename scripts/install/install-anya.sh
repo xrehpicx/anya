@@ -16,6 +16,7 @@ Environment:
   ANYA_INSTALL_DIR  Install directory. Defaults to \$HOME/.local/bin.
   ANYA_RELEASE      Release tag or "latest". Defaults to latest.
   ANYA_REPO         GitHub repository. Defaults to xrehpicx/anya.
+  ANYA_BINARY_ONLY  Set to 1 to fail instead of building from source when no release binary exists.
   ANYA_NO_RUSTUP    Set to 1 to fail instead of installing Rust for source builds.
 EOF
 }
@@ -208,6 +209,15 @@ printf 'Installing Anya for %s from %s\n' "$TARGET" "$URL"
 if download_if_available "$URL" "$ARCHIVE"; then
   install_from_archive
 else
+  if [ "${ANYA_BINARY_ONLY:-0}" = "1" ]; then
+    cat >&2 <<EOF
+No Anya release binary exists yet for $TARGET at $URL.
+
+Publish the matching release asset, or rerun without ANYA_BINARY_ONLY to allow a source build.
+EOF
+    exit 1
+  fi
+
   install_from_source
 fi
 

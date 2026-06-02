@@ -20,6 +20,20 @@ curl -fsSL https://raw.githubusercontent.com/xrehpicx/anya/main/scripts/install/
 See [README-ANYA.md](README-ANYA.md) for Anya service, channel, session, and TUI
 commands.
 
+## Update Anya
+
+After Anya is installed, update the current binary from the latest GitHub release:
+
+```shell
+anya update
+```
+
+`anya update` installs into the current `anya` binary directory by default and
+restarts the user `anya.service` when the install succeeds. Use
+`anya update --no-restart-service` if you want to restart the service manually.
+
+Release/publish notes for maintainers live in [ANYA_PUBLISHING.md](ANYA_PUBLISHING.md).
+
 ---
 
 The upstream Codex README follows.

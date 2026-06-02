@@ -4,6 +4,7 @@ mod codex_rpc;
 mod home;
 mod service;
 mod setup;
+mod update;
 mod whatsapp;
 
 use std::io::BufRead;
@@ -76,6 +77,8 @@ enum CommandKind {
     Config(anya_config::ConfigArgs),
     /// Configure Anya's first-run setup state.
     Setup(setup::SetupArgs),
+    /// Update the installed Anya binary from GitHub releases.
+    Update(update::UpdateArgs),
     /// Install and run the WhatsApp bridge channel.
     Whatsapp(Box<whatsapp::WhatsappArgs>),
     /// Create, list, and bind generalized chat channels to Codex threads.
@@ -353,6 +356,7 @@ async fn run(arg0_paths: Arg0DispatchPaths) -> Result<()> {
         CommandKind::Service(args) => service(args).await,
         CommandKind::Config(args) => anya_config::run(args).await,
         CommandKind::Setup(args) => setup::run(args).await,
+        CommandKind::Update(args) => update::run(args).await,
         CommandKind::Whatsapp(args) => whatsapp::run(*args).await,
         CommandKind::Channel(args) => channel(args).await,
         CommandKind::SessionCreate(args) => session_create(args).await,
@@ -1086,6 +1090,37 @@ mod tests {
                 assert_eq!("ws://127.0.0.1:4827", args.endpoint);
                 assert!(!args.include_hidden);
                 assert!(matches!(args.format, ModelsFormat::Whatsapp));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_update_command() {
+        let cli = Cli::try_parse_from([
+            "anya",
+            "update",
+            "--repo",
+            "xrehpicx/anya",
+            "--release",
+            "anya-v0.1.0",
+            "--install-dir",
+            "/tmp/anya-bin",
+            "--source-fallback",
+            "--no-restart-service",
+            "--service-name",
+            "anya-dev",
+        ])
+        .unwrap();
+
+        match cli.command {
+            CommandKind::Update(args) => {
+                assert_eq!("xrehpicx/anya", args.repo);
+                assert_eq!("anya-v0.1.0", args.release);
+                assert_eq!(PathBuf::from("/tmp/anya-bin"), args.install_dir.unwrap());
+                assert!(args.source_fallback);
+                assert!(args.no_restart_service);
+                assert_eq!("anya-dev", args.service_name);
             }
             other => panic!("unexpected command: {other:?}"),
         }

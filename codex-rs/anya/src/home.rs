@@ -219,10 +219,13 @@ First-run setup is about the user's chosen default workdir and self-iteration fi
 ## Service and Auth
 
 - Check auth through the running gateway: `anya auth status --timeout-secs 60`
+- Update installed Anya from the latest release and safely restart the service: `anya update`
+- Update without restarting the service: `anya update --no-restart-service`
 - Restart safely from inside Anya: `anya service restart --name anya`
 - Print a unit: `anya service print --user "$USER" --binary "$HOME/.local/bin/anya"`
 
 Do not run `systemctl --user restart anya.service` directly from inside Anya. Use `anya service restart --name anya`.
+For publishing/release procedure, read `ANYA_PUBLISHING.md` in the Anya repo before cutting or refreshing release assets.
 
 ## Sessions and Models
 
