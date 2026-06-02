@@ -542,6 +542,7 @@ async fn session_send(args: SessionSendArgs) -> Result<()> {
     }
 
     let channel = args.channel.clone();
+    let message = message_with_channel_context(channel.as_deref(), message);
     let mut thread_id = match (args.thread_id, args.channel) {
         (Some(thread_id), None) => thread_id,
         (None, Some(channel)) => ChannelStore::load()
@@ -640,6 +641,7 @@ async fn session_send(args: SessionSendArgs) -> Result<()> {
 }
 
 async fn session_steer(args: SessionSteerArgs) -> Result<()> {
+    let channel = args.channel.clone();
     let thread_id = match (args.thread_id, args.channel) {
         (Some(thread_id), None) => thread_id,
         (None, Some(channel)) => ChannelStore::load()
@@ -650,7 +652,7 @@ async fn session_steer(args: SessionSteerArgs) -> Result<()> {
         (Some(_), Some(_)) => anyhow::bail!("pass either --thread-id or --channel, not both"),
         (None, None) => anyhow::bail!("pass --thread-id or --channel"),
     };
-    let message = args.message.join(" ");
+    let message = message_with_channel_context(channel.as_deref(), args.message.join(" "));
     let mut client = CodexRpcClient::connect(&args.endpoint).await?;
     let response = client
         .turn_steer(thread_id, args.turn_id, message, args.images)
@@ -658,6 +660,20 @@ async fn session_steer(args: SessionSteerArgs) -> Result<()> {
     serde_json::to_writer_pretty(std::io::stdout(), &response)?;
     println!();
     Ok(())
+}
+
+fn message_with_channel_context(channel: Option<&str>, message: String) -> String {
+    let Some(channel) = channel else {
+        return message;
+    };
+    if !channel.starts_with("whatsapp:") {
+        return message;
+    }
+    format!(
+        "Channel context: This message was sent to Anya via WhatsApp. \
+Reply with WhatsApp as the user-facing surface unless the user asks otherwise. \
+WhatsApp channel: {channel}.\n\nUser message:\n{message}"
+    )
 }
 
 async fn models(args: ModelsArgs) -> Result<()> {
@@ -1022,6 +1038,30 @@ mod tests {
             parse_channel_slash_command("/models")
         );
         assert_eq!(None, parse_channel_slash_command("/model gpt-5.5"));
+    }
+
+    #[test]
+    fn adds_whatsapp_context_to_channel_messages() {
+        let message = message_with_channel_context(
+            Some("whatsapp:917619456969@s.whatsapp.net"),
+            "hello".to_string(),
+        );
+
+        assert!(message.contains("sent to Anya via WhatsApp"));
+        assert!(message.contains("WhatsApp channel: whatsapp:917619456969@s.whatsapp.net"));
+        assert!(message.ends_with("User message:\nhello"));
+    }
+
+    #[test]
+    fn leaves_non_whatsapp_channel_messages_unchanged() {
+        assert_eq!(
+            "hello",
+            message_with_channel_context(Some("main"), "hello".to_string())
+        );
+        assert_eq!(
+            "hello",
+            message_with_channel_context(None, "hello".to_string())
+        );
     }
 
     #[test]
