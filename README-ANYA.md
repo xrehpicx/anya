@@ -76,6 +76,37 @@ anya channel list
 anya rpc model/list
 ```
 
+## Restart and Update Follow-Ups
+
+Anya can queue persisted system events before it restarts or updates itself.
+The gateway drains these events after startup, once the app server and channel
+bridges are reachable.
+
+Queue an agent-handled follow-up:
+
+```sh
+anya system-event enqueue --channel "whatsapp:<jid>" "Continue after restart: <instruction>"
+```
+
+Queue a direct notification:
+
+```sh
+anya system-event enqueue --channel "whatsapp:<jid>" --direct "Anya restarted and is back online."
+```
+
+For self-updates, a simple post-update notification can be queued directly:
+
+```sh
+anya update --notify-channel "whatsapp:<jid>"
+```
+
+Inspect or manually drain queued events:
+
+```sh
+anya system-event list --json
+anya system-event drain
+```
+
 ## WhatsApp Bridge
 
 Anya can install a small WhatsApp Web bridge based on Baileys. It maps each

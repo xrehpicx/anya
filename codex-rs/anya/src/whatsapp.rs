@@ -674,6 +674,17 @@ async fn whatsapp_send(args: WhatsappSendArgs) -> Result<()> {
     print_control_response(response)
 }
 
+pub(crate) fn send_text_via_control(to: &str, text: &str) -> Result<()> {
+    whatsapp_control_request(serde_json::json!({
+        "action": "send",
+        "to": to,
+        "text": text,
+        "attachments": [],
+        "listenSecs": 0,
+    }))
+    .map(|_| ())
+}
+
 async fn whatsapp_contacts(args: WhatsappContactsArgs) -> Result<()> {
     let response = whatsapp_control_request(serde_json::json!({
         "action": "contacts",

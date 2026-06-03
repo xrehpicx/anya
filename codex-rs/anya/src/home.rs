@@ -220,12 +220,22 @@ First-run setup is about the user's chosen default workdir and self-iteration fi
 
 - Check auth through the running gateway: `anya auth status --timeout-secs 60`
 - Update installed Anya from the latest release and safely restart the service: `anya update`
+- Update and notify a channel after restart: `anya update --notify-channel "whatsapp:<jid>"`
 - Update without restarting the service: `anya update --no-restart-service`
 - Restart safely from inside Anya: `anya service restart --name anya`
 - Print a unit: `anya service print --user "$USER" --binary "$HOME/.local/bin/anya"`
 
 Do not run `systemctl --user restart anya.service` directly from inside Anya. Use `anya service restart --name anya`.
 For publishing/release procedure, read `ANYA_PUBLISHING.md` in the Anya repo before cutting or refreshing release assets.
+
+## System Events
+
+- Queue agent follow-up after restart/update: `anya system-event enqueue --channel "whatsapp:<jid>" "Continue after restart: <instruction>"`
+- Queue direct notification after restart/update: `anya system-event enqueue --channel "whatsapp:<jid>" --direct "Anya restarted and is back online."`
+- List pending events: `anya system-event list --json`
+- Drain pending events manually: `anya system-event drain`
+
+Before self-restarting or self-updating while the user expects a follow-up, queue a system event. The gateway drains queued events on startup after the app-server and WhatsApp bridge are reachable.
 
 ## Sessions and Models
 

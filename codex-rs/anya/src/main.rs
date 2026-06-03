@@ -4,6 +4,7 @@ mod codex_rpc;
 mod home;
 mod service;
 mod setup;
+mod system_events;
 mod update;
 mod whatsapp;
 
@@ -77,6 +78,8 @@ enum CommandKind {
     Config(anya_config::ConfigArgs),
     /// Configure Anya's first-run setup state.
     Setup(setup::SetupArgs),
+    /// Queue and inspect Anya service lifecycle events.
+    SystemEvent(system_events::SystemEventArgs),
     /// Update the installed Anya binary from GitHub releases.
     Update(update::UpdateArgs),
     /// Install and run the WhatsApp bridge channel.
@@ -356,6 +359,7 @@ async fn run(arg0_paths: Arg0DispatchPaths) -> Result<()> {
         CommandKind::Service(args) => service(args).await,
         CommandKind::Config(args) => anya_config::run(args).await,
         CommandKind::Setup(args) => setup::run(args).await,
+        CommandKind::SystemEvent(args) => system_events::run(args).await,
         CommandKind::Update(args) => update::run(args).await,
         CommandKind::Whatsapp(args) => whatsapp::run(*args).await,
         CommandKind::Channel(args) => channel(args).await,
@@ -468,6 +472,11 @@ async fn serve(args: ServeArgs, arg0_paths: Arg0DispatchPaths) -> Result<()> {
         None
     } else {
         whatsapp::spawn_gateway_bridge(&args.listen).await?
+    };
+    let _system_event_dispatcher = if args.no_channels {
+        None
+    } else {
+        Some(system_events::spawn_startup_dispatcher(args.listen.clone()))
     };
     codex_app_server::run_main_with_transport_options(
         arg0_paths,
@@ -1110,6 +1119,10 @@ mod tests {
             "--no-restart-service",
             "--service-name",
             "anya-dev",
+            "--notify-channel",
+            "whatsapp:123@lid",
+            "--notify-message",
+            "updated",
         ])
         .unwrap();
 
@@ -1121,6 +1134,38 @@ mod tests {
                 assert!(args.source_fallback);
                 assert!(args.no_restart_service);
                 assert_eq!("anya-dev", args.service_name);
+                assert_eq!(Some("whatsapp:123@lid".to_string()), args.notify_channel);
+                assert_eq!("updated", args.notify_message);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_system_event_enqueue_command() {
+        let cli = Cli::try_parse_from([
+            "anya",
+            "system-event",
+            "enqueue",
+            "--channel",
+            "whatsapp:123@lid",
+            "--direct",
+            "Anya restarted",
+        ])
+        .unwrap();
+
+        match cli.command {
+            CommandKind::SystemEvent(system_events::SystemEventArgs {
+                command:
+                    system_events::SystemEventCommand::Enqueue(system_events::SystemEventEnqueueArgs {
+                        channel,
+                        direct,
+                        message,
+                    }),
+            }) => {
+                assert_eq!("whatsapp:123@lid", channel);
+                assert!(direct);
+                assert_eq!(vec!["Anya restarted".to_string()], message);
             }
             other => panic!("unexpected command: {other:?}"),
         }

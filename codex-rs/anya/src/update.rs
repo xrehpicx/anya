@@ -8,6 +8,7 @@ use clap::Args;
 use tokio::process::Command;
 
 use crate::service;
+use crate::system_events;
 
 const DEFAULT_REPO: &str = "xrehpicx/anya";
 const DEFAULT_RELEASE: &str = "latest";
@@ -38,6 +39,14 @@ pub(crate) struct UpdateArgs {
     /// User systemd service name to restart after the update.
     #[arg(long, default_value = "anya")]
     pub(crate) service_name: String,
+
+    /// Queue a post-update notification for this channel, e.g. whatsapp:<jid>.
+    #[arg(long)]
+    pub(crate) notify_channel: Option<String>,
+
+    /// Message to send when --notify-channel is used.
+    #[arg(long, default_value = "Anya update completed.")]
+    pub(crate) notify_message: String,
 }
 
 pub(crate) async fn run(args: UpdateArgs) -> Result<()> {
@@ -82,6 +91,12 @@ pub(crate) async fn run(args: UpdateArgs) -> Result<()> {
 
     if !status.success() {
         anyhow::bail!("Anya update installer failed with status {status}");
+    }
+
+    if let Some(channel) = args.notify_channel {
+        let event =
+            system_events::enqueue_direct_notification(channel, args.notify_message).await?;
+        println!("Queued post-update system event {}.", event.id);
     }
 
     if args.no_restart_service {
