@@ -845,7 +845,9 @@ const messageLogPath =
   join(process.env.HOME || '.', '.local', 'share', 'anya', 'whatsapp', 'message-log.json');
 const historySyncWaitMs = parseTimeout(process.env.ANYA_WHATSAPP_HISTORY_SYNC_WAIT_MS, 12_000);
 const maxMediaBytes = parseTimeout(process.env.ANYA_WHATSAPP_MAX_MEDIA_BYTES, 25 * 1024 * 1024);
-const streamReplies = parseBoolEnv(process.env.ANYA_WHATSAPP_STREAM_REPLIES, false);
+const streamReplies = parseBoolEnv(process.env.ANYA_WHATSAPP_STREAM_REPLIES, true);
+const streamFlushMs = parseTimeout(process.env.ANYA_WHATSAPP_STREAM_FLUSH_MS, 1_200);
+const streamFlushChars = parseTimeout(process.env.ANYA_WHATSAPP_STREAM_FLUSH_CHARS, 600);
 const activeRuns = new Map();
 const knownContacts = new Map();
 const knownChats = new Map();
@@ -2213,9 +2215,10 @@ async function replyText(sock, remoteJid, message, text, options = {}) {
 
 function shouldFlushText(buffer, delta) {
   return (
-    buffer.length >= 900 ||
+    buffer.length >= streamFlushChars ||
     /\n\s*\n$/.test(buffer) ||
-    /[.!?]\s+$/.test(delta)
+    /[.!?]["')\]]?\s+$/.test(buffer) ||
+    /[.!?]["')\]]?\s+$/.test(delta)
   );
 }
 
@@ -2258,7 +2261,7 @@ async function streamPrompt(sock, remoteJid, message, channel, text, options = {
   };
   const scheduleFlush = () => {
     if (flushTimer) return;
-    flushTimer = setTimeout(flush, 2_500);
+    flushTimer = setTimeout(flush, streamFlushMs);
     flushTimer.unref?.();
   };
 
@@ -2866,9 +2869,13 @@ mod tests {
         assert!(BRIDGE_MJS.contains("--stream-json"));
         assert!(BRIDGE_MJS.contains("{ quoted }"));
         assert!(BRIDGE_MJS.contains("ANYA_WHATSAPP_STREAM_REPLIES"));
+        assert!(BRIDGE_MJS.contains("ANYA_WHATSAPP_STREAM_FLUSH_MS"));
+        assert!(BRIDGE_MJS.contains("ANYA_WHATSAPP_STREAM_FLUSH_CHARS"));
         assert!(
-            BRIDGE_MJS.contains("parseBoolEnv(process.env.ANYA_WHATSAPP_STREAM_REPLIES, false)")
+            BRIDGE_MJS.contains("parseBoolEnv(process.env.ANYA_WHATSAPP_STREAM_REPLIES, true)")
         );
+        assert!(BRIDGE_MJS.contains("setTimeout(flush, streamFlushMs)"));
+        assert!(BRIDGE_MJS.contains("buffer.length >= streamFlushChars"));
     }
 
     #[test]
