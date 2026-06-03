@@ -2366,12 +2366,28 @@ async function waitForActiveTurnId(channel, timeoutMs = 60_000) {
   return activeRuns.get(channel)?.turnId || null;
 }
 
-async function steerActiveRun(sock, remoteJid, message, channel, text, options = {}) {
-  const turnId = await waitForActiveTurnId(channel);
-  if (!turnId) {
-    console.error(`Anya WhatsApp steer skipped: no active turn id for ${channel}`);
-    return;
+function updateActiveTurnId(channel, turnId) {
+  if (!turnId) return;
+  const active = activeRuns.get(channel);
+  if (active) active.turnId = turnId;
+}
+
+function parseTurnSteerResponse(output) {
+  try {
+    const response = JSON.parse(String(output || '').trim());
+    return response?.turnId || response?.turn_id || null;
+  } catch {
+    return null;
   }
+}
+
+function activeTurnIdFromMismatch(error) {
+  const message = error?.message || String(error);
+  const match = message.match(/but found [`']([^`']+)[`']/);
+  return match?.[1] || null;
+}
+
+async function runSessionSteer(channel, turnId, text, images) {
   const args = [
     'session-steer',
     '--endpoint',
@@ -2381,13 +2397,32 @@ async function steerActiveRun(sock, remoteJid, message, channel, text, options =
     '--turn-id',
     turnId,
   ];
-  for (const image of options.images || []) {
+  for (const image of images || []) {
     args.push('--image', image);
   }
-  args.push(promptWithWhatsappContext(remoteJid, text));
-  await runAnya(args, {
+  args.push(text);
+  const output = await runAnya(args, {
     timeoutMs: commandTimeoutMs,
   });
+  updateActiveTurnId(channel, parseTurnSteerResponse(output) || turnId);
+}
+
+async function steerActiveRun(sock, remoteJid, message, channel, text, options = {}) {
+  const turnId = await waitForActiveTurnId(channel);
+  if (!turnId) {
+    console.error(`Anya WhatsApp steer skipped: no active turn id for ${channel}`);
+    return;
+  }
+  const prompt = promptWithWhatsappContext(remoteJid, text);
+  try {
+    await runSessionSteer(channel, turnId, prompt, options.images || []);
+  } catch (error) {
+    const foundTurnId = activeTurnIdFromMismatch(error);
+    if (!foundTurnId || foundTurnId === turnId) throw error;
+    console.warn(`Anya WhatsApp steer retrying with active turn id ${foundTurnId}`);
+    updateActiveTurnId(channel, foundTurnId);
+    await runSessionSteer(channel, foundTurnId, prompt, options.images || []);
+  }
 }
 
 function steerActiveRunInBackground(sock, remoteJid, message, channel, text, options = {}) {
@@ -2956,6 +2991,9 @@ mod tests {
         assert!(BRIDGE_MJS.contains("turn_accepted"));
         assert!(BRIDGE_MJS.contains("waitForActiveTurnId"));
         assert!(BRIDGE_MJS.contains("steerActiveRunInBackground"));
+        assert!(BRIDGE_MJS.contains("activeTurnIdFromMismatch"));
+        assert!(BRIDGE_MJS.contains("parseTurnSteerResponse"));
+        assert!(BRIDGE_MJS.contains("Anya WhatsApp steer retrying with active turn id"));
         assert!(!BRIDGE_MJS.contains("Anya is already replying in this channel"));
     }
 
