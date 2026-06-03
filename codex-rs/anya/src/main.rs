@@ -46,9 +46,18 @@ use crate::codex_rpc::CodexRpcClient;
 use crate::codex_rpc::ModelVisibility;
 
 const CHANNEL_SLASH_HELP: &str = "Anya commands: /new, /reset, /stop, /status, /models, /help.";
+const FAST_SERVICE_TIER: &str = "fast";
 
 fn parse_reasoning_effort(value: &str) -> std::result::Result<ReasoningEffort, String> {
     value.parse()
+}
+
+fn service_tier_arg(fast: bool, service_tier: Option<String>) -> Option<String> {
+    if fast {
+        Some(FAST_SERVICE_TIER.to_string())
+    } else {
+        service_tier
+    }
 }
 
 #[derive(Debug, Parser)]
@@ -240,6 +249,12 @@ struct SessionCreateArgs {
     endpoint: String,
     #[arg(long)]
     model: Option<String>,
+    /// Enable fast service tier for this session.
+    #[arg(long, conflicts_with = "service_tier")]
+    fast: bool,
+    /// Override service tier for this session, e.g. fast or default.
+    #[arg(long)]
+    service_tier: Option<String>,
     #[arg(long)]
     cwd: Option<String>,
     #[arg(long)]
@@ -268,6 +283,12 @@ struct SessionSendArgs {
     /// Override reasoning effort for this turn and subsequent turns.
     #[arg(long, value_parser = parse_reasoning_effort)]
     effort: Option<ReasoningEffort>,
+    /// Enable fast service tier for this turn and subsequent turns.
+    #[arg(long, conflicts_with = "service_tier")]
+    fast: bool,
+    /// Override service tier for this turn and subsequent turns, e.g. fast or default.
+    #[arg(long)]
+    service_tier: Option<String>,
     #[arg(required = true, trailing_var_arg = true)]
     message: Vec<String>,
 }
@@ -419,13 +440,24 @@ async fn auth_status(args: AuthStatusArgs) -> Result<()> {
     let mut client = CodexRpcClient::connect(&args.endpoint).await?;
     println!("Gateway: connected ({})", args.endpoint);
 
-    let response = client.thread_start(/*model*/ None, /*cwd*/ None).await?;
+    let response = client
+        .thread_start(
+            /*model*/ None, /*service_tier*/ None, /*cwd*/ None,
+        )
+        .await?;
     let thread_id = response.thread.id;
     println!("Probe thread: {thread_id}");
     let probe = "Reply exactly: auth-ok".to_string();
     let result = tokio::time::timeout(
         timeout_duration,
-        client.turn_start_collect(thread_id, probe, Vec::new(), None, None),
+        client.turn_start_collect(
+            thread_id,
+            probe,
+            Vec::new(),
+            None,
+            None,
+            /*service_tier*/ None,
+        ),
     )
     .await;
     match result {
@@ -532,7 +564,10 @@ async fn channel(args: ChannelArgs) -> Result<()> {
 
 async fn session_create(args: SessionCreateArgs) -> Result<()> {
     let mut client = CodexRpcClient::connect(&args.endpoint).await?;
-    let response = client.thread_start(args.model, args.cwd).await?;
+    let service_tier = service_tier_arg(args.fast, args.service_tier);
+    let response = client
+        .thread_start(args.model, service_tier, args.cwd)
+        .await?;
     if let Some(channel) = args.channel {
         let mut store = ChannelStore::load().await?;
         store.bind(channel, response.thread.id.clone());
@@ -548,6 +583,7 @@ async fn session_send(args: SessionSendArgs) -> Result<()> {
     let images = args.images.clone();
     let model = args.model.clone();
     let effort = args.effort;
+    let service_tier = service_tier_arg(args.fast, args.service_tier.clone());
     if let (Some(channel), Some(command)) =
         (args.channel.clone(), parse_channel_slash_command(&message))
     {
@@ -585,6 +621,7 @@ async fn session_send(args: SessionSendArgs) -> Result<()> {
                 images.clone(),
                 model.clone(),
                 effort,
+                service_tier.clone(),
             )
             .await
         {
@@ -595,7 +632,7 @@ async fn session_send(args: SessionSendArgs) -> Result<()> {
                     .context("channel is required for stale thread recovery")?;
                 let thread_id = create_default_channel_thread(&mut client, channel).await?;
                 client
-                    .turn_start_json_stream(thread_id, message, images, model, effort)
+                    .turn_start_json_stream(thread_id, message, images, model, effort, service_tier)
                     .await?;
             }
             Err(error) => return Err(error),
@@ -608,6 +645,7 @@ async fn session_send(args: SessionSendArgs) -> Result<()> {
                 images.clone(),
                 model.clone(),
                 effort,
+                service_tier.clone(),
             )
             .await
         {
@@ -618,7 +656,7 @@ async fn session_send(args: SessionSendArgs) -> Result<()> {
                     .context("channel is required for stale thread recovery")?;
                 let thread_id = create_default_channel_thread(&mut client, channel).await?;
                 client
-                    .turn_start_collect(thread_id, message, images, model, effort)
+                    .turn_start_collect(thread_id, message, images, model, effort, service_tier)
                     .await?
             }
             Err(error) => return Err(error),
@@ -632,6 +670,7 @@ async fn session_send(args: SessionSendArgs) -> Result<()> {
                 images.clone(),
                 model.clone(),
                 effort,
+                service_tier.clone(),
             )
             .await
         {
@@ -642,7 +681,7 @@ async fn session_send(args: SessionSendArgs) -> Result<()> {
                     .context("channel is required for stale thread recovery")?;
                 let thread_id = create_default_channel_thread(&mut client, channel).await?;
                 client
-                    .turn_start(thread_id, message, images, model, effort)
+                    .turn_start(thread_id, message, images, model, effort, service_tier)
                     .await?
             }
             Err(error) => return Err(error),
@@ -722,7 +761,7 @@ fn print_model_list(models: &[codex_app_server_protocol::Model], style: ModelLis
                 println!("{}", format_model_line(model, "-"));
             }
             println!(
-                "Use `anya session-send --model <model-id> ...` or WhatsApp `/model <model-id>`."
+                "Use `anya session-send --model <model-id> --fast ...` or WhatsApp `/model <model-id>` and `/fast on`."
             );
         }
         ModelListStyle::Whatsapp => {
@@ -732,6 +771,7 @@ fn print_model_list(models: &[codex_app_server_protocol::Model], style: ModelLis
             }
             println!("Send /model <model-id> to switch this WhatsApp channel.");
             println!("Send /model default to return to the configured default.");
+            println!("Send /fast on or /fast off to change fast mode for this WhatsApp channel.");
         }
     }
 }
@@ -771,12 +811,26 @@ async fn session_send_slash_command(
                 println!("Started a new Anya session for this channel.");
             } else if wait {
                 let response = client
-                    .turn_start_collect(thread_id, rest, Vec::new(), None, None)
+                    .turn_start_collect(
+                        thread_id,
+                        rest,
+                        Vec::new(),
+                        None,
+                        None,
+                        /*service_tier*/ None,
+                    )
                     .await?;
                 println!("{response}");
             } else {
                 let response = client
-                    .turn_start(thread_id, rest, Vec::new(), None, None)
+                    .turn_start(
+                        thread_id,
+                        rest,
+                        Vec::new(),
+                        None,
+                        None,
+                        /*service_tier*/ None,
+                    )
                     .await?;
                 serde_json::to_writer_pretty(std::io::stdout(), &response)?;
                 println!();
@@ -806,7 +860,11 @@ async fn create_default_channel_thread(
     client: &mut CodexRpcClient,
     channel: &str,
 ) -> Result<String> {
-    let response = client.thread_start(/*model*/ None, /*cwd*/ None).await?;
+    let response = client
+        .thread_start(
+            /*model*/ None, /*service_tier*/ None, /*cwd*/ None,
+        )
+        .await?;
     let mut store = ChannelStore::load().await?;
     store.bind(channel.to_string(), response.thread.id.clone());
     store.save().await?;
@@ -866,7 +924,9 @@ async fn chat(args: ChatArgs) -> Result<()> {
     let mut thread_id = match store.resolve(&channel) {
         Some(thread_id) => thread_id.to_string(),
         None => {
-            let response = client.thread_start(model.clone(), cwd.clone()).await?;
+            let response = client
+                .thread_start(model.clone(), /*service_tier*/ None, cwd.clone())
+                .await?;
             let thread_id = response.thread.id;
             store.bind(channel.clone(), thread_id.clone());
             store.save().await?;
@@ -895,7 +955,9 @@ async fn chat(args: ChatArgs) -> Result<()> {
         if let Some(command) = parse_channel_slash_command(message) {
             match command {
                 ChannelSlashCommand::New { rest } | ChannelSlashCommand::Reset { rest } => {
-                    let response = client.thread_start(model.clone(), cwd.clone()).await?;
+                    let response = client
+                        .thread_start(model.clone(), /*service_tier*/ None, cwd.clone())
+                        .await?;
                     thread_id = response.thread.id;
                     store.bind(channel.clone(), thread_id.clone());
                     store.save().await?;
@@ -932,7 +994,9 @@ async fn chat(args: ChatArgs) -> Result<()> {
         {
             Ok(()) => {}
             Err(error) if is_thread_not_found_error(&error) => {
-                let response = client.thread_start(model.clone(), cwd.clone()).await?;
+                let response = client
+                    .thread_start(model.clone(), /*service_tier*/ None, cwd.clone())
+                    .await?;
                 thread_id = response.thread.id;
                 store.bind(channel.clone(), thread_id.clone());
                 store.save().await?;
@@ -1099,6 +1163,49 @@ mod tests {
                 assert_eq!("ws://127.0.0.1:4827", args.endpoint);
                 assert!(!args.include_hidden);
                 assert!(matches!(args.format, ModelsFormat::Whatsapp));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_session_fast_mode_options() {
+        let cli = Cli::try_parse_from([
+            "anya",
+            "session-send",
+            "--channel",
+            "main",
+            "--model",
+            "gpt-5.5",
+            "--effort",
+            "low",
+            "--fast",
+            "hello",
+        ])
+        .unwrap();
+        match cli.command {
+            CommandKind::SessionSend(args) => {
+                assert!(args.fast);
+                assert_eq!(None, args.service_tier);
+                assert_eq!(Some("gpt-5.5".to_string()), args.model);
+                assert_eq!(Some(ReasoningEffort::Low), args.effort);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from([
+            "anya",
+            "session-create",
+            "--channel",
+            "main",
+            "--service-tier",
+            "default",
+        ])
+        .unwrap();
+        match cli.command {
+            CommandKind::SessionCreate(args) => {
+                assert!(!args.fast);
+                assert_eq!(Some("default".to_string()), args.service_tier);
             }
             other => panic!("unexpected command: {other:?}"),
         }

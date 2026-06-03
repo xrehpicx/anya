@@ -234,6 +234,7 @@ async fn run_agent_event(endpoint: &str, event: &SystemEvent) -> Result<String> 
             Vec::new(),
             /*model*/ None,
             /*effort*/ None,
+            /*service_tier*/ None,
         )
         .await
 }
@@ -243,7 +244,11 @@ async fn ensure_channel_thread(client: &mut CodexRpcClient, channel: &str) -> Re
     if let Some(thread_id) = store.resolve(channel) {
         return Ok(thread_id.to_string());
     }
-    let response = client.thread_start(/*model*/ None, /*cwd*/ None).await?;
+    let response = client
+        .thread_start(
+            /*model*/ None, /*service_tier*/ None, /*cwd*/ None,
+        )
+        .await?;
     store.bind(channel.to_string(), response.thread.id.clone());
     store.save().await?;
     Ok(response.thread.id)

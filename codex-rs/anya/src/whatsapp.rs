@@ -973,9 +973,19 @@ function normalizeReasoningEffort(value) {
   throw new Error('Reasoning effort must be one of: none, minimal, low, medium, high, xhigh, default.');
 }
 
+function normalizeServiceTier(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (['default', 'unset', 'clear'].includes(normalized)) return null;
+  if (['off', 'false', 'disabled'].includes(normalized)) return 'default';
+  if (['on', 'true', 'enabled', 'fast'].includes(normalized)) return 'fast';
+  if (/^[a-z0-9][a-z0-9._-]*$/i.test(normalized)) return normalized;
+  throw new Error('Service tier must be fast, default, off, or a valid service tier id.');
+}
+
 function describeChannelSettings(channel) {
   const settings = settingsForChannel(channel);
-  return `Model: ${settings.model || 'default'}. Thinking: ${settings.effort || 'default'}.`;
+  const fastMode = settings.serviceTier === 'fast' ? 'on' : settings.serviceTier || 'default';
+  return `Model: ${settings.model || 'default'}. Thinking: ${settings.effort || 'default'}. Fast: ${fastMode}.`;
 }
 
 function runProcess(command, args, options = {}) {
@@ -2288,7 +2298,7 @@ function parseSlashCommand(text) {
 }
 
 function isChannelSlashCommand(command) {
-  return ['new', 'reset', 'stop', 'status', 'help', 'reply', 'models', 'model', 'effort', 'thinking', 'settings'].includes(command?.name);
+  return ['new', 'reset', 'stop', 'status', 'help', 'reply', 'models', 'model', 'effort', 'thinking', 'fast', 'service-tier', 'settings'].includes(command?.name);
 }
 
 function stopActiveRun(channel) {
@@ -2435,6 +2445,7 @@ async function streamPrompt(sock, remoteJid, message, channel, text, options = {
     }
     if (settings.model) args.push('--model', settings.model);
     if (settings.effort) args.push('--effort', settings.effort);
+    if (settings.serviceTier) args.push('--service-tier', settings.serviceTier);
     args.push(promptWithWhatsappContext(remoteJid, text));
     await streamAnya(args, {
       onMessageDelta: (delta) => {
@@ -2626,6 +2637,38 @@ async function handleSlashCommand(sock, remoteJid, message, command) {
       await replyText(sock, remoteJid, message, `Updated. ${describeChannelSettings(channel)}`);
       return true;
     }
+    case 'fast': {
+      const value = command.rest.trim();
+      if (!value) {
+        await replyText(
+          sock,
+          remoteJid,
+          message,
+          `${describeChannelSettings(channel)} Usage: /fast <on|off|default>`
+        );
+        return true;
+      }
+      const serviceTier = normalizeServiceTier(value);
+      updateChannelSettings(channel, { serviceTier });
+      await replyText(sock, remoteJid, message, `Updated. ${describeChannelSettings(channel)}`);
+      return true;
+    }
+    case 'service-tier': {
+      const value = command.rest.trim();
+      if (!value) {
+        await replyText(
+          sock,
+          remoteJid,
+          message,
+          `${describeChannelSettings(channel)} Usage: /service-tier <fast|default|tier-id>`
+        );
+        return true;
+      }
+      const serviceTier = normalizeServiceTier(value);
+      updateChannelSettings(channel, { serviceTier });
+      await replyText(sock, remoteJid, message, `Updated. ${describeChannelSettings(channel)}`);
+      return true;
+    }
     case 'reply':
       if (!command.rest) {
         await replyText(sock, remoteJid, message, 'Usage: /reply <message>');
@@ -2649,7 +2692,7 @@ async function handleSlashCommand(sock, remoteJid, message, command) {
         sock,
         remoteJid,
         message,
-        'Anya commands: /new, /reset, /stop, /status, /models, /model, /thinking, /settings, /reply, /help. In groups, mention anya or start with /anya or /ask to chat.'
+        'Anya commands: /new, /reset, /stop, /status, /models, /model, /thinking, /fast, /service-tier, /settings, /reply, /help. In groups, mention anya or start with /anya or /ask to chat.'
       );
       return true;
   }
@@ -3155,13 +3198,18 @@ mod tests {
         assert!(BRIDGE_MJS.contains("ANYA_WHATSAPP_CHANNEL_SETTINGS_PATH"));
         assert!(BRIDGE_MJS.contains("channel-settings.json"));
         assert!(BRIDGE_MJS.contains("function normalizeReasoningEffort"));
+        assert!(BRIDGE_MJS.contains("function normalizeServiceTier"));
         assert!(BRIDGE_MJS.contains("args.push('--model', settings.model)"));
         assert!(BRIDGE_MJS.contains("args.push('--effort', settings.effort)"));
+        assert!(BRIDGE_MJS.contains("args.push('--service-tier', settings.serviceTier)"));
         assert!(BRIDGE_MJS.contains("'models', '--endpoint', endpoint, '--format', 'whatsapp'"));
         assert!(BRIDGE_MJS.contains("Usage: /model <model-id|default>"));
         assert!(
             BRIDGE_MJS.contains("Usage: /thinking <none|minimal|low|medium|high|xhigh|default>")
         );
+        assert!(BRIDGE_MJS.contains("Usage: /fast <on|off|default>"));
+        assert!(BRIDGE_MJS.contains("Usage: /service-tier <fast|default|tier-id>"));
+        assert!(BRIDGE_MJS.contains("Fast: ${fastMode}"));
     }
 
     #[test]

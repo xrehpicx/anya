@@ -44,7 +44,7 @@ When you are running inside the Anya service and need to restart or update that 
 
 If the user expects a notification or follow-up after Anya restarts or updates itself, queue a persisted system event before restarting. Use `anya system-event enqueue --channel "<channel>" "instruction to continue after restart"` for agent follow-up, or `anya system-event enqueue --channel "<channel>" --direct "Anya restarted."` for direct notification. For self-updates, prefer `anya update --notify-channel "<channel>"` when a simple update-completed notification is enough."#;
 
-const ANYA_WHATSAPP_CHANNEL_INSTRUCTIONS: &str = r#"When speaking through WhatsApp, users can change Anya channel settings with slash commands. Use `/models` to list available model IDs, `/model <model-id>` to set the current WhatsApp channel model, `/model default` to clear it, `/thinking <none|minimal|low|medium|high|xhigh>` to set reasoning effort, and `/thinking default` to clear it. If a user asks to change model or thinking level from WhatsApp, tell them the exact command to send instead of editing config files by hand."#;
+const ANYA_WHATSAPP_CHANNEL_INSTRUCTIONS: &str = r#"When speaking through WhatsApp, users can change Anya channel settings with slash commands. Use `/models` to list available model IDs, `/model <model-id>` to set the current WhatsApp channel model, `/model default` to clear it, `/thinking <none|minimal|low|medium|high|xhigh>` to set reasoning effort, `/thinking default` to clear it, `/fast on` to enable fast service tier, `/fast off` to request the default service tier, and `/fast default` to clear the channel service-tier override. If a user asks to change model, thinking level, or fast mode from WhatsApp, tell them the exact command to send instead of editing config files by hand."#;
 
 const ANYA_SETUP_INSTRUCTIONS: &str = r#"When a user asks whether Anya setup is done, asks to configure Anya, starts a new channel and appears to be initiating setup, or asks what Anya's default working directory is, run `anya setup status --json` before answering. Treat first-run setup as distinct from service health: `anya.service` running, auth passing, and WhatsApp connected do not mean setup is complete. If setup is incomplete, use the `anya-setup` skill, ask one missing setup question at a time, and persist confirmed answers with `anya setup set --default-workdir ... --self-iteration-file ... --confirm`. Do not claim setup is complete without checking this command.
 
@@ -87,6 +87,7 @@ impl CodexRpcClient {
     pub async fn thread_start(
         &mut self,
         model: Option<String>,
+        service_tier: Option<String>,
         cwd: Option<String>,
     ) -> Result<ThreadStartResponse> {
         let request_id = self.request_id();
@@ -94,6 +95,7 @@ impl CodexRpcClient {
             request_id,
             params: ThreadStartParams {
                 model,
+                service_tier: service_tier.map(Some),
                 cwd,
                 approval_policy: Some(AskForApproval::Never),
                 sandbox: Some(SandboxMode::DangerFullAccess),
@@ -126,6 +128,7 @@ impl CodexRpcClient {
         images: Vec<PathBuf>,
         model: Option<String>,
         effort: Option<ReasoningEffort>,
+        service_tier: Option<String>,
     ) -> Result<TurnStartResponse> {
         let request_id = self.request_id();
         self.request_typed(ClientRequest::TurnStart {
@@ -135,6 +138,7 @@ impl CodexRpcClient {
                 input: turn_input(text, images),
                 model,
                 effort,
+                service_tier: service_tier.map(Some),
                 ..TurnStartParams::default()
             },
         })
@@ -180,7 +184,9 @@ impl CodexRpcClient {
         images: Vec<PathBuf>,
     ) -> Result<()> {
         let response = self
-            .turn_start_collect(thread_id, text, images, None, None)
+            .turn_start_collect(
+                thread_id, text, images, None, None, /*service_tier*/ None,
+            )
             .await?;
         let mut stdout = std::io::stdout().lock();
         stdout.write_all(response.as_bytes())?;
@@ -195,6 +201,7 @@ impl CodexRpcClient {
         images: Vec<PathBuf>,
         model: Option<String>,
         effort: Option<ReasoningEffort>,
+        service_tier: Option<String>,
     ) -> Result<()> {
         let request_id = self.request_id();
         let request = ClientRequest::TurnStart {
@@ -204,6 +211,7 @@ impl CodexRpcClient {
                 input: turn_input(text, images),
                 model,
                 effort,
+                service_tier: service_tier.map(Some),
                 ..TurnStartParams::default()
             },
         };
@@ -297,6 +305,7 @@ impl CodexRpcClient {
         images: Vec<PathBuf>,
         model: Option<String>,
         effort: Option<ReasoningEffort>,
+        service_tier: Option<String>,
     ) -> Result<String> {
         let request_id = self.request_id();
         let request = ClientRequest::TurnStart {
@@ -306,6 +315,7 @@ impl CodexRpcClient {
                 input: turn_input(text, images),
                 model,
                 effort,
+                service_tier: service_tier.map(Some),
                 ..TurnStartParams::default()
             },
         };
