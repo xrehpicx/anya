@@ -843,11 +843,15 @@ const controlSocketPath =
 const messageLogPath =
   process.env.ANYA_WHATSAPP_MESSAGE_LOG_PATH ||
   join(process.env.HOME || '.', '.local', 'share', 'anya', 'whatsapp', 'message-log.json');
+const bridgeNoticePath =
+  process.env.ANYA_WHATSAPP_BRIDGE_NOTICE_PATH ||
+  join(process.env.HOME || '.', '.local', 'share', 'anya', 'whatsapp', 'bridge-notices.json');
 const historySyncWaitMs = parseTimeout(process.env.ANYA_WHATSAPP_HISTORY_SYNC_WAIT_MS, 12_000);
 const maxMediaBytes = parseTimeout(process.env.ANYA_WHATSAPP_MAX_MEDIA_BYTES, 25 * 1024 * 1024);
 const streamReplies = parseBoolEnv(process.env.ANYA_WHATSAPP_STREAM_REPLIES, true);
 const streamFlushMs = parseTimeout(process.env.ANYA_WHATSAPP_STREAM_FLUSH_MS, 1_200);
 const streamFlushChars = parseTimeout(process.env.ANYA_WHATSAPP_STREAM_FLUSH_CHARS, 600);
+const sendRetryMs = parseTimeout(process.env.ANYA_WHATSAPP_SEND_RETRY_MS, 2_000);
 const activeRuns = new Map();
 const knownContacts = new Map();
 const knownChats = new Map();
@@ -855,11 +859,16 @@ const temporaryInboundAllows = new Map();
 const pendingHistoryReads = new Map();
 let channelSettings = loadChannelSettings();
 let messageLog = loadMessageLog();
+let bridgeNotices = loadBridgeNotices();
+let currentSock = null;
+let controlServer = null;
+let reconnectScheduled = false;
 
 mkdirSync(sessionDir, { recursive: true });
 mkdirSync(mediaDir, { recursive: true });
 mkdirSync(dirname(controlSocketPath), { recursive: true });
 mkdirSync(dirname(messageLogPath), { recursive: true });
+mkdirSync(dirname(bridgeNoticePath), { recursive: true });
 
 class AnyaRunStoppedError extends Error {
   constructor() {
@@ -912,9 +921,23 @@ function loadMessageLog() {
   }
 }
 
+function loadBridgeNotices() {
+  try {
+    const parsed = JSON.parse(readFileSync(bridgeNoticePath, 'utf8'));
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
 function saveMessageLog() {
   mkdirSync(dirname(messageLogPath), { recursive: true });
   writeFileSync(messageLogPath, JSON.stringify(messageLog, null, 2));
+}
+
+function saveBridgeNotices() {
+  mkdirSync(dirname(bridgeNoticePath), { recursive: true });
+  writeFileSync(bridgeNoticePath, JSON.stringify(bridgeNotices, null, 2));
 }
 
 function saveChannelSettings() {
@@ -1539,6 +1562,101 @@ function mediaKindSupportsCaption(mediaKind) {
   return ['document', 'image', 'video'].includes(mediaKind);
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function compactError(error) {
+  const message = error?.message || String(error);
+  return message.replace(/\s+/g, ' ').slice(0, 180);
+}
+
+function isConnectionClosedError(error) {
+  const statusCode = error?.output?.statusCode || error?.statusCode;
+  const message = error?.message || String(error);
+  return (
+    statusCode === DisconnectReason.connectionClosed ||
+    statusCode === 428 ||
+    /connection closed/i.test(message)
+  );
+}
+
+function bridgeNoticeText(error) {
+  return `Anya WhatsApp bridge lost its connection while sending a reply and reconnected. If the previous reply is missing, send the message again or /status. (${compactError(error)})`;
+}
+
+function queueBridgeNotice(jid, text) {
+  if (!jid || !text) return;
+  const list = Array.isArray(bridgeNotices[jid]) ? bridgeNotices[jid] : [];
+  if (!list.some((notice) => notice.text === text)) {
+    list.push({
+      text,
+      timestamp: Math.floor(Date.now() / 1000),
+    });
+  }
+  bridgeNotices[jid] = list.slice(-5);
+  saveBridgeNotices();
+}
+
+function jidFromChannel(channel) {
+  const prefix = `${channelPrefix}:`;
+  return String(channel || '').startsWith(prefix) ? channel.slice(prefix.length) : null;
+}
+
+function queueBridgeNoticesForActiveRuns(error) {
+  for (const channel of activeRuns.keys()) {
+    queueBridgeNotice(jidFromChannel(channel), bridgeNoticeText(error));
+  }
+}
+
+async function waitForCurrentSock(previousSock, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (currentSock && currentSock !== previousSock) return currentSock;
+    await sleep(100);
+  }
+  return currentSock || previousSock;
+}
+
+async function sendMessageWithRetry(sock, jid, content, options, retryOptions = {}) {
+  const required = retryOptions.required !== false;
+  const queueNotice = retryOptions.queueNotice !== false;
+  let candidate = currentSock || sock;
+  let lastError = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      return await candidate.sendMessage(jid, content, options);
+    } catch (error) {
+      lastError = error;
+      if (!isConnectionClosedError(error)) break;
+      console.error(`Anya WhatsApp send connection error: ${error?.stack || error?.message || error}`);
+      candidate = await waitForCurrentSock(candidate, sendRetryMs);
+      await sleep(sendRetryMs);
+    }
+  }
+  if (queueNotice) queueBridgeNotice(jid, bridgeNoticeText(lastError));
+  if (required) throw lastError;
+  return null;
+}
+
+async function drainBridgeNotices(sock) {
+  const nextNotices = {};
+  for (const [jid, notices] of Object.entries(bridgeNotices)) {
+    if (!Array.isArray(notices) || notices.length === 0) continue;
+    for (const notice of notices) {
+      try {
+        await sock.sendMessage(jid, { text: notice.text });
+      } catch (error) {
+        console.error(`Anya WhatsApp notice send failed: ${error?.stack || error?.message || error}`);
+        nextNotices[jid] = notices.slice(notices.indexOf(notice));
+        break;
+      }
+    }
+  }
+  bridgeNotices = nextNotices;
+  saveBridgeNotices();
+}
+
 async function sendOutboundAttachment(sock, jid, attachment, caption) {
   const content = (() => {
     switch (attachment.mediaKind) {
@@ -1576,7 +1694,7 @@ async function sendOutboundAttachment(sock, jid, attachment, caption) {
         throw new Error(`unsupported outbound media kind: ${attachment.mediaKind}`);
     }
   })();
-  return sock.sendMessage(jid, content);
+  return sendMessageWithRetry(sock, jid, content, undefined, { required: true });
 }
 
 function outboundLogBase(jid, result, text) {
@@ -1592,7 +1710,7 @@ function outboundLogBase(jid, result, text) {
 }
 
 async function sendOutboundText(sock, jid, text) {
-  const result = await sock.sendMessage(jid, { text });
+  const result = await sendMessageWithRetry(sock, jid, { text }, undefined, { required: true });
   const entry = {
     ...outboundLogBase(jid, result, text),
     hasMedia: false,
@@ -2210,7 +2328,7 @@ function isThreadNotFoundError(error) {
 
 async function replyText(sock, remoteJid, message, text, options = {}) {
   const sendOptions = options.quoted ? { quoted: message } : undefined;
-  await sock.sendMessage(remoteJid, { text }, sendOptions);
+  await sendMessageWithRetry(sock, remoteJid, { text }, sendOptions, { required: false });
 }
 
 function lastRegexEnd(text, regex) {
@@ -2442,7 +2560,7 @@ async function handleSlashCommand(sock, remoteJid, message, command) {
         try {
           await streamPrompt(sock, remoteJid, message, channel, command.rest);
         } finally {
-          await sock.sendPresenceUpdate('paused', remoteJid);
+          await sock.sendPresenceUpdate('paused', remoteJid).catch(() => {});
         }
       } else {
         await replyText(sock, remoteJid, message, 'Started a new Anya session for this channel.');
@@ -2523,7 +2641,7 @@ async function handleSlashCommand(sock, remoteJid, message, command) {
           quoted: true,
         });
       } finally {
-        await sock.sendPresenceUpdate('paused', remoteJid);
+        await sock.sendPresenceUpdate('paused', remoteJid).catch(() => {});
       }
       return true;
     case 'help':
@@ -2600,7 +2718,7 @@ async function handleMessage(sock, message) {
       await replyText(sock, remoteJid, message, formatAnyaError(error));
     }
   } finally {
-    await sock.sendPresenceUpdate('paused', remoteJid);
+    await sock.sendPresenceUpdate('paused', remoteJid).catch(() => {});
   }
 }
 
@@ -2630,6 +2748,7 @@ async function start() {
     syncFullHistory: true,
     version,
   });
+  currentSock = sock;
 
   if (pairPhoneNumber && !state.creds.registered) {
     setTimeout(() => void requestPhonePairingCode(sock), 2500);
@@ -2667,7 +2786,7 @@ async function start() {
     }));
     notifyHistoryMessages(changedJids);
   });
-  startControlServer(sock);
+  startControlServer();
   sock.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
     if (qr && !pairPhoneNumber) {
       console.log('Scan this QR code with WhatsApp:');
@@ -2677,22 +2796,43 @@ async function start() {
     }
     if (connection === 'open') {
       console.log('Anya WhatsApp bridge connected.');
+      setTimeout(() => void drainBridgeNotices(sock), 1500);
     }
     if (connection === 'close') {
       const statusCode = lastDisconnect?.error?.output?.statusCode;
-      if (statusCode !== DisconnectReason.loggedOut) start();
+      if (statusCode !== DisconnectReason.loggedOut) scheduleReconnect(lastDisconnect?.error);
       else console.log('WhatsApp logged out. Remove the session directory and pair again.');
     }
   });
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return;
     for (const message of messages) {
-      await handleMessage(sock, message);
+      try {
+        await handleMessage(sock, message);
+      } catch (error) {
+        const remoteJid = message?.key?.remoteJid;
+        console.error(`Anya WhatsApp unhandled message error: ${error?.stack || error?.message || error}`);
+        queueBridgeNotice(remoteJid, bridgeNoticeText(error));
+      }
     }
   });
 }
 
-function startControlServer(sock) {
+function scheduleReconnect(error) {
+  if (reconnectScheduled) return;
+  reconnectScheduled = true;
+  console.error(`Anya WhatsApp bridge reconnecting: ${error?.message || error || 'connection closed'}`);
+  setTimeout(() => {
+    reconnectScheduled = false;
+    void start().catch((startError) => {
+      console.error(`Anya WhatsApp reconnect failed: ${startError?.stack || startError?.message || startError}`);
+      scheduleReconnect(startError);
+    });
+  }, 2000).unref?.();
+}
+
+function startControlServer() {
+  if (controlServer) return;
   try {
     unlinkSync(controlSocketPath);
   } catch {
@@ -2706,17 +2846,19 @@ function startControlServer(sock) {
       while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
         const line = buffer.slice(0, newlineIndex);
         buffer = buffer.slice(newlineIndex + 1);
-        void handleControlLine(sock, connection, line);
+        void handleControlLine(currentSock, connection, line);
       }
     });
   });
   server.listen(controlSocketPath, () => {
     console.log(`Anya WhatsApp control socket listening at ${controlSocketPath}`);
   });
+  controlServer = server;
 }
 
 async function handleControlLine(sock, connection, line) {
   try {
+    if (!sock) throw new Error('WhatsApp bridge is not connected yet');
     const request = JSON.parse(line);
     let data;
     switch (request.action) {
@@ -2756,6 +2898,17 @@ async function handleControlLine(sock, connection, line) {
     connection.end();
   }
 }
+
+process.on('unhandledRejection', (error) => {
+  console.error(`Anya WhatsApp unhandled rejection: ${error?.stack || error?.message || error}`);
+  queueBridgeNoticesForActiveRuns(error);
+});
+
+process.on('uncaughtException', (error) => {
+  console.error(`Anya WhatsApp uncaught exception: ${error?.stack || error?.message || error}`);
+  queueBridgeNoticesForActiveRuns(error);
+  setTimeout(() => process.exit(1), 250).unref?.();
+});
 
 // Baileys can unref its socket timers after setup returns; keep this bridge
 // process alive so it can continue receiving messages.
@@ -3015,11 +3168,28 @@ mod tests {
     fn whatsapp_bridge_exposes_agent_control_socket() {
         assert!(BRIDGE_MJS.contains("ANYA_WHATSAPP_CONTROL_SOCKET"));
         assert!(BRIDGE_MJS.contains("function startControlServer"));
+        assert!(BRIDGE_MJS.contains("let currentSock = null"));
         assert!(BRIDGE_MJS.contains("sendOutboundMessage"));
         assert!(BRIDGE_MJS.contains("readRecordedMessages"));
         assert!(BRIDGE_MJS.contains("listKnownContacts"));
         assert!(BRIDGE_MJS.contains("temporaryInboundAllows"));
         assert!(BRIDGE_MJS.contains("messaging-history.set"));
+    }
+
+    #[test]
+    fn whatsapp_bridge_recovers_from_send_crashes() {
+        assert!(BRIDGE_MJS.contains("ANYA_WHATSAPP_BRIDGE_NOTICE_PATH"));
+        assert!(BRIDGE_MJS.contains("ANYA_WHATSAPP_SEND_RETRY_MS"));
+        assert!(BRIDGE_MJS.contains("function sendMessageWithRetry"));
+        assert!(BRIDGE_MJS.contains("function queueBridgeNotice"));
+        assert!(BRIDGE_MJS.contains("function drainBridgeNotices"));
+        assert!(
+            BRIDGE_MJS.contains("Anya WhatsApp bridge lost its connection while sending a reply")
+        );
+        assert!(BRIDGE_MJS.contains("process.on('unhandledRejection'"));
+        assert!(BRIDGE_MJS.contains("process.on('uncaughtException'"));
+        assert!(BRIDGE_MJS.contains("function scheduleReconnect"));
+        assert!(BRIDGE_MJS.contains("sendPresenceUpdate('paused', remoteJid).catch"));
     }
 
     #[test]
