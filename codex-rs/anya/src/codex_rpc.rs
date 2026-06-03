@@ -28,10 +28,15 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tokio_tungstenite::MaybeTlsStream;
 use tokio_tungstenite::WebSocketStream;
-use tokio_tungstenite::connect_async;
+use tokio_tungstenite::connect_async_with_config;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
 type Ws = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
+
+// Match Codex's remote app-server client. Large completed items can arrive
+// before normal context compaction has a chance to run.
+const ANYA_APP_SERVER_MAX_WEBSOCKET_MESSAGE_SIZE: usize = 128 << 20;
 
 const ANYA_DEVELOPER_INSTRUCTIONS: &str = r#"You are Anya, a coding agent based on Codex. When asked who you are or what your name is, identify yourself as Anya. Keep the Codex coding-agent behavior, tools, and safety model, but use the Anya name in user-facing channel conversations.
 
@@ -65,9 +70,13 @@ impl CodexRpcClient {
         if !(endpoint.starts_with("ws://") || endpoint.starts_with("wss://")) {
             anyhow::bail!("CLI client endpoint must be ws:// or wss://; got {endpoint:?}");
         }
-        let (ws, _) = connect_async(endpoint)
-            .await
-            .with_context(|| format!("connect to Codex app-server at {endpoint}"))?;
+        let (ws, _) = connect_async_with_config(
+            endpoint,
+            Some(anya_app_server_websocket_config()),
+            /*disable_nagle*/ false,
+        )
+        .await
+        .with_context(|| format!("connect to Codex app-server at {endpoint}"))?;
         let mut client = Self { next_id: 1, ws };
         client.initialize().await?;
         Ok(client)
@@ -455,6 +464,12 @@ impl CodexRpcClient {
     }
 }
 
+fn anya_app_server_websocket_config() -> WebSocketConfig {
+    WebSocketConfig::default()
+        .max_frame_size(Some(ANYA_APP_SERVER_MAX_WEBSOCKET_MESSAGE_SIZE))
+        .max_message_size(Some(ANYA_APP_SERVER_MAX_WEBSOCKET_MESSAGE_SIZE))
+}
+
 fn turn_input(text: String, images: Vec<PathBuf>) -> Vec<UserInput> {
     let mut input = images
         .into_iter()
@@ -488,4 +503,14 @@ fn decode_ws_message(message: Message) -> Result<Option<JSONRPCMessage>> {
     serde_json::from_str::<JSONRPCMessage>(&text)
         .context("decode JSON-RPC message")
         .map(Some)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn app_server_websocket_limit_matches_codex_remote_client() {
+        assert_eq!(128 << 20, ANYA_APP_SERVER_MAX_WEBSOCKET_MESSAGE_SIZE);
+    }
 }
