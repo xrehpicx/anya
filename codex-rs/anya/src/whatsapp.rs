@@ -2213,13 +2213,30 @@ async function replyText(sock, remoteJid, message, text, options = {}) {
   await sock.sendMessage(remoteJid, { text }, sendOptions);
 }
 
-function shouldFlushText(buffer, delta) {
-  return (
-    buffer.length >= streamFlushChars ||
-    /\n\s*\n$/.test(buffer) ||
-    /[.!?]["')\]]?\s+$/.test(buffer) ||
-    /[.!?]["')\]]?\s+$/.test(delta)
+function lastRegexEnd(text, regex) {
+  regex.lastIndex = 0;
+  let end = 0;
+  let match;
+  while ((match = regex.exec(text)) !== null) {
+    end = match.index + match[0].length;
+  }
+  return end;
+}
+
+function naturalChunkEnd(text) {
+  return Math.max(
+    lastRegexEnd(text, /\n\s*\n/g),
+    lastRegexEnd(text, /[.!?]["')\]]?(?:\s+|$)/g),
+    lastRegexEnd(text, /\n+/g)
   );
+}
+
+function wordBoundaryEnd(text, limit) {
+  const capped = Math.min(limit, text.length);
+  for (let index = capped; index > 0; index -= 1) {
+    if (/\s/.test(text[index - 1])) return index;
+  }
+  return capped;
 }
 
 function promptWithWhatsappContext(remoteJid, text) {
@@ -2251,17 +2268,35 @@ async function streamPrompt(sock, remoteJid, message, channel, text, options = {
   const sendPresence = () => {
     void sock.sendPresenceUpdate('composing', remoteJid).catch(() => {});
   };
-  const flush = () => {
+  const nextFlushChunk = (force = false) => {
+    if (!buffer.trim()) {
+      buffer = '';
+      return null;
+    }
+    let end = naturalChunkEnd(buffer);
+    if (end <= 0 && buffer.length >= streamFlushChars) {
+      end = naturalChunkEnd(buffer.slice(0, streamFlushChars));
+      if (end <= 0) end = wordBoundaryEnd(buffer, streamFlushChars);
+    }
+    if (end <= 0 && force) end = buffer.length;
+    if (end <= 0) return null;
+
+    const chunk = buffer.slice(0, end).trim();
+    buffer = buffer.slice(end).replace(/^\s+/, '');
+    return chunk || null;
+  };
+  const flush = (force = false) => {
     clearTimeout(flushTimer);
     flushTimer = undefined;
-    const chunk = buffer.trim();
-    buffer = '';
-    if (!chunk) return;
-    enqueue(() => replyText(sock, remoteJid, message, chunk, { quoted }));
+    while (true) {
+      const chunk = nextFlushChunk(force);
+      if (!chunk) return;
+      enqueue(() => replyText(sock, remoteJid, message, chunk, { quoted }));
+    }
   };
   const scheduleFlush = () => {
     if (flushTimer) return;
-    flushTimer = setTimeout(flush, streamFlushMs);
+    flushTimer = setTimeout(() => flush(false), streamFlushMs);
     flushTimer.unref?.();
   };
 
@@ -2288,8 +2323,8 @@ async function streamPrompt(sock, remoteJid, message, channel, text, options = {
         if (!delta) return;
         buffer += delta;
         if (!streamReplies) return;
-        if (shouldFlushText(buffer, delta)) flush();
-        else scheduleFlush();
+        flush(false);
+        if (buffer) scheduleFlush();
       },
       onActivity: (event) => {
         if (event?.type === 'turn_accepted' && event.turn_id) {
@@ -2302,7 +2337,7 @@ async function streamPrompt(sock, remoteJid, message, channel, text, options = {
       activeKey: channel,
       timeoutMs: replyTimeoutMs,
     });
-    flush();
+    flush(true);
     await sendQueue;
   } finally {
     clearInterval(presenceInterval);
@@ -2874,7 +2909,10 @@ mod tests {
         assert!(
             BRIDGE_MJS.contains("parseBoolEnv(process.env.ANYA_WHATSAPP_STREAM_REPLIES, true)")
         );
-        assert!(BRIDGE_MJS.contains("setTimeout(flush, streamFlushMs)"));
+        assert!(BRIDGE_MJS.contains("function naturalChunkEnd(text)"));
+        assert!(BRIDGE_MJS.contains("function wordBoundaryEnd(text, limit)"));
+        assert!(BRIDGE_MJS.contains("const nextFlushChunk = (force = false)"));
+        assert!(BRIDGE_MJS.contains("setTimeout(() => flush(false), streamFlushMs)"));
         assert!(BRIDGE_MJS.contains("buffer.length >= streamFlushChars"));
     }
 
