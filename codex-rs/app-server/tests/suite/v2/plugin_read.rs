@@ -122,7 +122,7 @@ async fn plugin_read_rejects_multiple_read_sources() -> Result<()> {
 }
 
 #[tokio::test]
-async fn plugin_read_reads_remote_plugin_details_when_remote_plugin_is_disabled() -> Result<()> {
+async fn plugin_read_returns_remote_mcp_servers_when_uninstalled() -> Result<()> {
     let codex_home = TempDir::new()?;
     let server = MockServer::start().await;
     std::fs::write(
@@ -148,22 +148,31 @@ plugins = true
 
     let detail_body = r#"{
   "id": "plugins~Plugin_00000000000000000000000000000000",
-  "name": "linear",
+  "name": "example-plugin",
   "scope": "GLOBAL",
   "installation_policy": "AVAILABLE",
   "authentication_policy": "ON_USE",
   "release": {
-    "display_name": "Linear",
-    "description": "Track work in Linear",
+    "version": "1.2.1",
+    "display_name": "Example Plugin",
+    "description": "Example plugin",
     "app_ids": [],
     "keywords": [],
     "interface": {
-      "short_description": "Plan and track work",
+      "short_description": "Example plugin",
       "capabilities": [],
-      "default_prompt": "Use the legacy Linear prompt",
+      "default_prompt": "Use the legacy example prompt",
       "default_prompts": []
     },
-    "skills": []
+    "skills": [],
+    "mcp_servers": [
+      {
+        "key": "example-server",
+        "metadata": {
+          "command": "example-mcp"
+        }
+      }
+    ]
   }
 }"#;
     let installed_body = r#"{
@@ -211,12 +220,15 @@ plugins = true
     let response: PluginReadResponse = to_response(response)?;
 
     assert_eq!(response.plugin.marketplace_name, "openai-curated-remote");
-    assert_eq!(response.plugin.summary.id, "linear@openai-curated-remote");
+    assert_eq!(
+        response.plugin.summary.id,
+        "example-plugin@openai-curated-remote"
+    );
     assert_eq!(
         response.plugin.summary.remote_plugin_id.as_deref(),
         Some("plugins~Plugin_00000000000000000000000000000000")
     );
-    assert_eq!(response.plugin.summary.name, "linear");
+    assert_eq!(response.plugin.summary.name, "example-plugin");
     assert_eq!(response.plugin.summary.source, PluginSource::Remote);
     assert_eq!(response.plugin.summary.share_context, None);
     assert_eq!(
@@ -226,7 +238,11 @@ plugins = true
             .interface
             .as_ref()
             .and_then(|interface| interface.default_prompt.clone()),
-        Some(vec!["Use the legacy Linear prompt".to_string()])
+        Some(vec!["Use the legacy example prompt".to_string()])
+    );
+    assert_eq!(
+        response.plugin.mcp_servers,
+        vec!["example-server".to_string()]
     );
     Ok(())
 }
