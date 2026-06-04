@@ -476,6 +476,32 @@ async fn load_config_resolves_experimental_request_user_input_enabled() -> std::
     Ok(())
 }
 
+#[tokio::test]
+async fn load_config_resolves_code_mode_config() -> std::io::Result<()> {
+    let codex_home = tempdir()?;
+    let config_toml: ConfigToml = toml::from_str(
+        r#"
+[features.code_mode]
+enabled = true
+excluded_tool_namespaces = ["mcp__codex_apps", "multi_agent_v1"]
+"#,
+    )
+    .expect("TOML deserialization should succeed");
+    let config = Config::load_from_base_config_with_overrides(
+        config_toml,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+
+    assert_eq!(
+        config.code_mode.excluded_tool_namespaces,
+        vec!["mcp__codex_apps".to_string(), "multi_agent_v1".to_string()]
+    );
+    assert!(config.features.enabled(Feature::CodeMode));
+    Ok(())
+}
+
 #[test]
 fn rejects_provider_auth_with_env_key() {
     let err = toml::from_str::<ConfigToml>(
