@@ -63,8 +63,9 @@ fn migrate_legacy_codex_home(anya_home: &Path) -> Result<()> {
         return Ok(());
     }
 
+    copy_newer_legacy_auth(&legacy_home.join("auth.json"), &anya_home.join("auth.json"))?;
+
     for entry in [
-        "auth.json",
         "config.toml",
         "sessions",
         "memories",
@@ -76,6 +77,46 @@ fn migrate_legacy_codex_home(anya_home: &Path) -> Result<()> {
     ] {
         copy_if_missing(&legacy_home.join(entry), &anya_home.join(entry))?;
     }
+    Ok(())
+}
+
+fn copy_newer_legacy_auth(source: &Path, destination: &Path) -> Result<()> {
+    if !source.is_file() {
+        return Ok(());
+    }
+
+    let should_copy = match (std::fs::metadata(source), std::fs::metadata(destination)) {
+        (Ok(source_metadata), Ok(destination_metadata)) => {
+            match (source_metadata.modified(), destination_metadata.modified()) {
+                (Ok(source_modified), Ok(destination_modified)) => {
+                    source_modified > destination_modified
+                }
+                _ => false,
+            }
+        }
+        (Ok(_), Err(_)) => true,
+        _ => false,
+    };
+
+    if should_copy {
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create Anya auth dir {}", parent.display()))?;
+        }
+        std::fs::copy(source, destination).with_context(|| {
+            format!(
+                "refresh Anya auth from legacy Codex auth {} -> {}",
+                source.display(),
+                destination.display()
+            )
+        })?;
+        let permissions = std::fs::metadata(source)
+            .with_context(|| format!("read legacy auth metadata {}", source.display()))?
+            .permissions();
+        std::fs::set_permissions(destination, permissions)
+            .with_context(|| format!("set permissions on {}", destination.display()))?;
+    }
+
     Ok(())
 }
 
