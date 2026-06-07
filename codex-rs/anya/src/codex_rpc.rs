@@ -265,6 +265,8 @@ impl CodexRpcClient {
                                 &mut stdout,
                                 serde_json::json!({
                                     "type": "message_delta",
+                                    "turn_id": delta.turn_id,
+                                    "item_id": delta.item_id,
                                     "delta": delta.delta,
                                 }),
                             )?;

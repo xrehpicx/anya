@@ -1200,7 +1200,7 @@ function streamAnya(args, callbacks, options = {}) {
         return;
       }
       if (event.type === 'message_delta') {
-        callbacks.onMessageDelta?.(event.delta || '');
+        callbacks.onMessageDelta?.(event.delta || '', event);
       } else {
         callbacks.onActivity?.(event);
       }
@@ -2351,10 +2351,17 @@ function lastRegexEnd(text, regex) {
   return end;
 }
 
+function strongChunkEnd(text) {
+  return Math.max(
+    lastRegexEnd(text, /\n\s*\n/g),
+    lastRegexEnd(text, /```[\s\S]*?```\s*/g)
+  );
+}
+
 function naturalChunkEnd(text) {
   return Math.max(
     lastRegexEnd(text, /\n\s*\n/g),
-    lastRegexEnd(text, /[.!?]["')\]]?(?:\s+|$)/g),
+    lastRegexEnd(text, /(?<!\d)[.!?]["')\]]?(?:\s+|$)/g),
     lastRegexEnd(text, /\n+/g)
   );
 }
@@ -2381,6 +2388,7 @@ function promptWithWhatsappContext(remoteJid, text) {
 async function streamPrompt(sock, remoteJid, message, channel, text, options = {}) {
   let buffer = '';
   let flushTimer;
+  let activeMessageItemId = null;
   let sendQueue = Promise.resolve();
   const quoted = Boolean(options.quoted);
   const images = options.images || [];
@@ -2401,9 +2409,11 @@ async function streamPrompt(sock, remoteJid, message, channel, text, options = {
       buffer = '';
       return null;
     }
-    let end = naturalChunkEnd(buffer);
+    let end = force ? naturalChunkEnd(buffer) : strongChunkEnd(buffer);
     if (end <= 0 && buffer.length >= streamFlushChars) {
-      end = naturalChunkEnd(buffer.slice(0, streamFlushChars));
+      end = force
+        ? naturalChunkEnd(buffer.slice(0, streamFlushChars))
+        : strongChunkEnd(buffer.slice(0, streamFlushChars));
       if (end <= 0) end = wordBoundaryEnd(buffer, streamFlushChars);
     }
     if (end <= 0 && force) end = buffer.length;
@@ -2448,8 +2458,12 @@ async function streamPrompt(sock, remoteJid, message, channel, text, options = {
     if (settings.serviceTier) args.push('--service-tier', settings.serviceTier);
     args.push(promptWithWhatsappContext(remoteJid, text));
     await streamAnya(args, {
-      onMessageDelta: (delta) => {
+      onMessageDelta: (delta, event) => {
         if (!delta) return;
+        if (event?.item_id && activeMessageItemId && event.item_id !== activeMessageItemId) {
+          flush(true);
+        }
+        if (event?.item_id) activeMessageItemId = event.item_id;
         buffer += delta;
         if (!streamReplies) return;
         flush(false);
@@ -3140,6 +3154,10 @@ mod tests {
         assert!(
             BRIDGE_MJS.contains("parseBoolEnv(process.env.ANYA_WHATSAPP_STREAM_REPLIES, true)")
         );
+        assert!(BRIDGE_MJS.contains("callbacks.onMessageDelta?.(event.delta || '', event)"));
+        assert!(BRIDGE_MJS.contains("let activeMessageItemId = null"));
+        assert!(BRIDGE_MJS.contains("event?.item_id && activeMessageItemId"));
+        assert!(BRIDGE_MJS.contains("function strongChunkEnd(text)"));
         assert!(BRIDGE_MJS.contains("function naturalChunkEnd(text)"));
         assert!(BRIDGE_MJS.contains("function wordBoundaryEnd(text, limit)"));
         assert!(BRIDGE_MJS.contains("const nextFlushChunk = (force = false)"));
