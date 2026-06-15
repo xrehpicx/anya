@@ -38,7 +38,6 @@ use codex_tui::ExitReason;
 use codex_utils_cli::ApprovalModeCliArg;
 use codex_utils_cli::CliConfigOverrides;
 use codex_utils_cli::SandboxModeCliArg;
-use codex_utils_cli::resume_hint;
 use supports_color::Stream;
 
 use crate::channel::ChannelStore;
@@ -620,7 +619,7 @@ async fn session_send(args: SessionSendArgs) -> Result<()> {
                 message.clone(),
                 images.clone(),
                 model.clone(),
-                effort,
+                effort.clone(),
                 service_tier.clone(),
             )
             .await
@@ -644,7 +643,7 @@ async fn session_send(args: SessionSendArgs) -> Result<()> {
                 message.clone(),
                 images.clone(),
                 model.clone(),
-                effort,
+                effort.clone(),
                 service_tier.clone(),
             )
             .await
@@ -669,7 +668,7 @@ async fn session_send(args: SessionSendArgs) -> Result<()> {
                 message.clone(),
                 images.clone(),
                 model.clone(),
-                effort,
+                effort.clone(),
                 service_tier.clone(),
             )
             .await
@@ -1056,8 +1055,7 @@ fn handle_tui_exit(exit_info: AppExitInfo) -> Result<()> {
 fn format_tui_exit_messages(exit_info: AppExitInfo, color_enabled: bool) -> Vec<String> {
     let AppExitInfo {
         token_usage,
-        thread_id,
-        thread_name,
+        resume_hint,
         ..
     } = exit_info;
 
@@ -1065,7 +1063,7 @@ fn format_tui_exit_messages(exit_info: AppExitInfo, color_enabled: bool) -> Vec<
     if !token_usage.is_zero() {
         lines.push(token_usage.to_string());
     }
-    if let Some(resume_cmd) = resume_hint(thread_name.as_deref(), thread_id) {
+    if let Some(resume_cmd) = resume_hint {
         let command = if color_enabled {
             "\u{1b}[36manya tui\u{1b}[39m".to_string()
         } else {
