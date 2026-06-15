@@ -1,6 +1,7 @@
 mod anya_config;
 mod channel;
 mod codex_rpc;
+mod gog;
 mod home;
 mod service;
 mod setup;
@@ -92,6 +93,9 @@ enum CommandKind {
     Update(update::UpdateArgs),
     /// Install and run the WhatsApp bridge channel.
     Whatsapp(Box<whatsapp::WhatsappArgs>),
+    /// Connect Google services (Gmail, Calendar, Drive, …) to Anya via gog.
+    #[command(visible_alias = "gmail")]
+    Gog(gog::GogArgs),
     /// Create, list, and bind generalized chat channels to Codex threads.
     #[command(alias = "channels")]
     Channel(ChannelArgs),
@@ -382,6 +386,7 @@ async fn run(arg0_paths: Arg0DispatchPaths) -> Result<()> {
         CommandKind::SystemEvent(args) => system_events::run(args).await,
         CommandKind::Update(args) => update::run(args).await,
         CommandKind::Whatsapp(args) => whatsapp::run(*args).await,
+        CommandKind::Gog(args) => gog::run(args).await,
         CommandKind::Channel(args) => channel(args).await,
         CommandKind::SessionCreate(args) => session_create(args).await,
         CommandKind::SessionSend(args) => session_send(args).await,
