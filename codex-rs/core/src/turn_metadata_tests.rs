@@ -1,11 +1,18 @@
 use super::*;
 
+use crate::responses_metadata::CodexResponsesRequestKind;
+use crate::responses_metadata::CompactionTurnMetadata;
+use crate::responses_metadata::INSTALLATION_ID_KEY;
+use crate::responses_metadata::WINDOW_ID_KEY;
 use crate::sandbox_tags::permission_profile_sandbox_tag;
+use codex_analytics::CompactionImplementation;
+use codex_analytics::CompactionPhase;
+use codex_analytics::CompactionReason;
+use codex_analytics::CompactionTrigger;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
-use codex_protocol::protocol::ThreadSource;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use core_test_support::PathBufExt;
 use core_test_support::PathExt;
@@ -21,6 +28,44 @@ fn test_mcp_turn_metadata_context() -> McpTurnMetadataContext<'static> {
         model: "gpt-5.4",
         reasoning_effort: Some(ReasoningEffortConfig::High),
     }
+}
+
+fn test_responses_metadata_json(
+    state: &TurnMetadataState,
+    window_id: &str,
+    request_kind: CodexResponsesRequestKind,
+) -> String {
+    state
+        .to_responses_metadata(
+            "installation-a".to_string(),
+            window_id.to_string(),
+            request_kind,
+        )
+        .turn_metadata_json()
+        .expect("turn metadata json")
+}
+
+fn test_turn_responses_metadata_json(state: &TurnMetadataState, window_id: &str) -> String {
+    test_responses_metadata_json(state, window_id, CodexResponsesRequestKind::Turn)
+}
+
+fn test_compaction_responses_metadata_json(
+    state: &TurnMetadataState,
+    window_id: &str,
+    compaction: CompactionTurnMetadata,
+) -> String {
+    test_responses_metadata_json(
+        state,
+        window_id,
+        CodexResponsesRequestKind::Compaction(compaction),
+    )
+}
+
+fn test_turn_metadata_header(state: &TurnMetadataState) -> String {
+    state
+        .responses_metadata_template()
+        .turn_metadata_json()
+        .expect("header")
 }
 
 async fn create_clean_git_repo(repo_name: &str) -> (TempDir, AbsolutePathBuf) {
@@ -64,12 +109,21 @@ async fn create_clean_git_repo(repo_name: &str) -> (TempDir, AbsolutePathBuf) {
 }
 
 #[tokio::test]
-async fn build_turn_metadata_header_marks_detached_memory_without_turn_identity() {
+async fn detached_memory_responses_metadata_omits_turn_identity() {
     let (_temp_dir, repo_path) = create_clean_git_repo("repo-東京").await;
 
-    let header = build_turn_metadata_header(&repo_path, Some("none"))
-        .await
-        .expect("header");
+    let header = detached_memory_responses_metadata(
+        String::new(),
+        String::new(),
+        String::new(),
+        String::new(),
+        &SessionSource::Unknown,
+        &repo_path,
+        Some("none"),
+    )
+    .await
+    .turn_metadata_json()
+    .expect("header");
     assert!(header.is_ascii());
     assert!(!header.contains("東京"));
     let parsed: Value = serde_json::from_str(&header).expect("valid json");
@@ -100,13 +154,22 @@ async fn build_turn_metadata_header_marks_detached_memory_without_turn_identity(
 }
 
 #[tokio::test]
-async fn build_turn_metadata_header_marks_memory_without_workspace_metadata() {
+async fn detached_memory_responses_metadata_omits_empty_workspace_metadata() {
     let temp_dir = TempDir::new().expect("temp dir");
     let cwd = temp_dir.path().abs();
 
-    let header = build_turn_metadata_header(&cwd, /*sandbox*/ None)
-        .await
-        .expect("detached memory should emit its request kind");
+    let header = detached_memory_responses_metadata(
+        String::new(),
+        String::new(),
+        String::new(),
+        String::new(),
+        &SessionSource::Unknown,
+        &cwd,
+        /*sandbox*/ None,
+    )
+    .await
+    .turn_metadata_json()
+    .expect("detached memory should emit its request kind");
     let parsed: Value = serde_json::from_str(&header).expect("valid json");
 
     assert_eq!(parsed, serde_json::json!({"request_kind": "memory"}));
@@ -122,8 +185,8 @@ fn turn_metadata_state_uses_platform_sandbox_tag() {
         "session-a".to_string(),
         "thread-a".to_string(),
         /*forked_from_thread_id*/ None,
+        /*parent_thread_id*/ None,
         &SessionSource::Exec,
-        Some(ThreadSource::User),
         "turn-a".to_string(),
         cwd,
         &permission_profile,
@@ -131,12 +194,11 @@ fn turn_metadata_state_uses_platform_sandbox_tag() {
         /*enforce_managed_network*/ false,
     );
 
-    let header = state.current_header_value().expect("header");
+    let header = test_turn_metadata_header(&state);
     let json: Value = serde_json::from_str(&header).expect("json");
     let sandbox_name = json.get("sandbox").and_then(Value::as_str);
     let session_id = json.get("session_id").and_then(Value::as_str);
     let thread_id = json.get("thread_id").and_then(Value::as_str);
-    let thread_source = json.get("thread_source").and_then(Value::as_str);
 
     assert!(json.get("request_kind").is_none());
     let expected_sandbox = permission_profile_sandbox_tag(
@@ -147,35 +209,9 @@ fn turn_metadata_state_uses_platform_sandbox_tag() {
     assert_eq!(sandbox_name, Some(expected_sandbox));
     assert_eq!(session_id, Some("session-a"));
     assert_eq!(thread_id, Some("thread-a"));
-    assert_eq!(thread_source, Some("user"));
     assert!(json.get("forked_from_thread_id").is_none());
     assert!(json.get("parent_thread_id").is_none());
     assert!(json.get("subagent_kind").is_none());
-    assert!(json.get("session_source").is_none());
-}
-
-#[test]
-fn turn_metadata_state_uses_explicit_subagent_thread_source() {
-    let temp_dir = TempDir::new().expect("temp dir");
-    let cwd = temp_dir.path().abs();
-    let permission_profile = PermissionProfile::read_only();
-    let state = TurnMetadataState::new(
-        "session-a".to_string(),
-        "thread-a".to_string(),
-        /*forked_from_thread_id*/ None,
-        &SessionSource::Exec,
-        Some(ThreadSource::Subagent),
-        "turn-a".to_string(),
-        cwd,
-        &permission_profile,
-        WindowsSandboxLevel::Disabled,
-        /*enforce_managed_network*/ false,
-    );
-
-    let header = state.current_header_value().expect("header");
-    let json: Value = serde_json::from_str(&header).expect("json");
-
-    assert_eq!(json["thread_source"].as_str(), Some("subagent"));
     assert!(json.get("session_source").is_none());
 }
 
@@ -191,8 +227,8 @@ fn turn_metadata_state_includes_root_fork_lineage() {
         "session-a".to_string(),
         "thread-a".to_string(),
         Some(source_thread_id),
+        /*parent_thread_id*/ None,
         &SessionSource::Exec,
-        Some(ThreadSource::User),
         "turn-a".to_string(),
         cwd,
         &permission_profile,
@@ -200,7 +236,7 @@ fn turn_metadata_state_includes_root_fork_lineage() {
         /*enforce_managed_network*/ false,
     );
 
-    let header = state.current_header_value().expect("header");
+    let header = test_turn_metadata_header(&state);
     let json: Value = serde_json::from_str(&header).expect("json");
 
     assert_eq!(
@@ -223,6 +259,7 @@ fn turn_metadata_state_includes_thread_spawn_subagent_parent_without_fork() {
         "session-a".to_string(),
         "thread-a".to_string(),
         /*forked_from_thread_id*/ None,
+        Some(parent_thread_id),
         &SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id,
             depth: 1,
@@ -230,7 +267,6 @@ fn turn_metadata_state_includes_thread_spawn_subagent_parent_without_fork() {
             agent_nickname: None,
             agent_role: None,
         }),
-        Some(ThreadSource::Subagent),
         "turn-a".to_string(),
         cwd,
         &permission_profile,
@@ -238,7 +274,7 @@ fn turn_metadata_state_includes_thread_spawn_subagent_parent_without_fork() {
         /*enforce_managed_network*/ false,
     );
 
-    let header = state.current_header_value().expect("header");
+    let header = test_turn_metadata_header(&state);
     let json: Value = serde_json::from_str(&header).expect("json");
 
     assert!(json.get("forked_from_thread_id").is_none());
@@ -261,6 +297,7 @@ fn turn_metadata_state_includes_forked_thread_spawn_subagent_lineage() {
         "session-a".to_string(),
         "thread-a".to_string(),
         Some(parent_thread_id),
+        Some(parent_thread_id),
         &SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id,
             depth: 1,
@@ -268,7 +305,6 @@ fn turn_metadata_state_includes_forked_thread_spawn_subagent_lineage() {
             agent_nickname: None,
             agent_role: None,
         }),
-        Some(ThreadSource::Subagent),
         "turn-a".to_string(),
         cwd,
         &permission_profile,
@@ -276,7 +312,7 @@ fn turn_metadata_state_includes_forked_thread_spawn_subagent_lineage() {
         /*enforce_managed_network*/ false,
     );
 
-    let header = state.current_header_value().expect("header");
+    let header = test_turn_metadata_header(&state);
     let json: Value = serde_json::from_str(&header).expect("json");
 
     assert_eq!(
@@ -291,38 +327,45 @@ fn turn_metadata_state_includes_forked_thread_spawn_subagent_lineage() {
 }
 
 #[test]
-fn turn_metadata_state_includes_known_parent_for_other_subagent() {
+fn turn_metadata_state_includes_known_parent_for_non_thread_spawn_subagents_without_fork() {
     let temp_dir = TempDir::new().expect("temp dir");
     let cwd = temp_dir.path().abs();
     let permission_profile = PermissionProfile::read_only();
     let parent_thread_id =
         ThreadId::from_string("44444444-4444-4444-8444-444444444444").expect("thread id");
+    let sources = [
+        (SubAgentSource::Review, "review"),
+        (SubAgentSource::Other("guardian".to_string()), "guardian"),
+        (
+            SubAgentSource::Other("agent_job:job-1".to_string()),
+            "agent_job:job-1",
+        ),
+    ];
 
-    let state = TurnMetadataState::new(
-        "session-a".to_string(),
-        "thread-a".to_string(),
-        Some(parent_thread_id),
-        &SessionSource::SubAgent(SubAgentSource::Other("guardian".to_string())),
-        Some(ThreadSource::Subagent),
-        "turn-a".to_string(),
-        cwd,
-        &permission_profile,
-        WindowsSandboxLevel::Disabled,
-        /*enforce_managed_network*/ false,
-    );
+    for (subagent_source, subagent_kind) in sources {
+        let state = TurnMetadataState::new(
+            "session-a".to_string(),
+            "thread-a".to_string(),
+            /*forked_from_thread_id*/ None,
+            Some(parent_thread_id),
+            &SessionSource::SubAgent(subagent_source),
+            "turn-a".to_string(),
+            cwd.clone(),
+            &permission_profile,
+            WindowsSandboxLevel::Disabled,
+            /*enforce_managed_network*/ false,
+        );
 
-    let header = state.current_header_value().expect("header");
-    let json: Value = serde_json::from_str(&header).expect("json");
+        let header = test_turn_metadata_header(&state);
+        let json: Value = serde_json::from_str(&header).expect("json");
 
-    assert_eq!(
-        json["forked_from_thread_id"].as_str(),
-        Some("44444444-4444-4444-8444-444444444444")
-    );
-    assert_eq!(
-        json["parent_thread_id"].as_str(),
-        Some("44444444-4444-4444-8444-444444444444")
-    );
-    assert_eq!(json["subagent_kind"].as_str(), Some("guardian"));
+        assert!(json.get("forked_from_thread_id").is_none());
+        assert_eq!(
+            json["parent_thread_id"].as_str(),
+            Some("44444444-4444-4444-8444-444444444444")
+        );
+        assert_eq!(json["subagent_kind"].as_str(), Some(subagent_kind));
+    }
 }
 
 #[test]
@@ -335,8 +378,8 @@ fn turn_metadata_state_includes_turn_started_at_unix_ms_after_start() {
         "session-a".to_string(),
         "thread-a".to_string(),
         /*forked_from_thread_id*/ None,
+        /*parent_thread_id*/ None,
         &SessionSource::Exec,
-        Some(ThreadSource::User),
         "turn-a".to_string(),
         cwd,
         &permission_profile,
@@ -345,7 +388,7 @@ fn turn_metadata_state_includes_turn_started_at_unix_ms_after_start() {
     );
     state.set_turn_started_at_unix_ms(/*turn_started_at_unix_ms*/ 1_700_000_000_123);
 
-    let header = state.current_header_value().expect("header");
+    let header = test_turn_metadata_header(&state);
     let json: Value = serde_json::from_str(&header).expect("json");
 
     assert_eq!(
@@ -364,8 +407,8 @@ fn turn_metadata_state_includes_model_and_reasoning_effort_only_in_request_meta(
         "session-a".to_string(),
         "thread-a".to_string(),
         /*forked_from_thread_id*/ None,
+        /*parent_thread_id*/ None,
         &SessionSource::Exec,
-        /*thread_source*/ None,
         "turn-a".to_string(),
         cwd,
         &permission_profile,
@@ -373,7 +416,7 @@ fn turn_metadata_state_includes_model_and_reasoning_effort_only_in_request_meta(
         /*enforce_managed_network*/ false,
     );
 
-    let header = state.current_header_value().expect("header");
+    let header = test_turn_metadata_header(&state);
     let header_json: Value = serde_json::from_str(&header).expect("json");
     assert!(header_json.get("model").is_none());
     assert!(header_json.get("reasoning_effort").is_none());
@@ -412,8 +455,8 @@ fn turn_metadata_state_marks_user_input_requested_during_turn_only_for_mcp_reque
         "session-a".to_string(),
         "thread-a".to_string(),
         /*forked_from_thread_id*/ None,
+        /*parent_thread_id*/ None,
         &SessionSource::Exec,
-        /*thread_source*/ None,
         "turn-a".to_string(),
         cwd,
         &permission_profile,
@@ -421,7 +464,7 @@ fn turn_metadata_state_marks_user_input_requested_during_turn_only_for_mcp_reque
         /*enforce_managed_network*/ false,
     );
 
-    let header = state.current_header_value().expect("header");
+    let header = test_turn_metadata_header(&state);
     let header_json: Value = serde_json::from_str(&header).expect("json");
     assert!(
         header_json
@@ -436,7 +479,7 @@ fn turn_metadata_state_marks_user_input_requested_during_turn_only_for_mcp_reque
 
     state.mark_user_input_requested_during_turn();
 
-    let header = state.current_header_value().expect("header");
+    let header = test_turn_metadata_header(&state);
     let header_json: Value = serde_json::from_str(&header).expect("json");
     assert!(
         header_json
@@ -464,8 +507,8 @@ fn turn_metadata_state_ignores_client_reserved_metadata_before_start() {
         "session-a".to_string(),
         "thread-a".to_string(),
         /*forked_from_thread_id*/ None,
+        /*parent_thread_id*/ None,
         &SessionSource::Exec,
-        Some(ThreadSource::User),
         "turn-a".to_string(),
         cwd,
         &permission_profile,
@@ -488,7 +531,7 @@ fn turn_metadata_state_ignores_client_reserved_metadata_before_start() {
         ("subagent_kind".to_string(), "client-supplied".to_string()),
     ]));
 
-    let header = state.current_header_value().expect("header");
+    let header = test_turn_metadata_header(&state);
     let json: Value = serde_json::from_str(&header).expect("json");
 
     assert!(json.get("turn_started_at_unix_ms").is_none());
@@ -511,6 +554,7 @@ fn turn_metadata_state_merges_client_metadata_without_replacing_reserved_fields(
         "session-a".to_string(),
         "thread-a".to_string(),
         Some(source_thread_id),
+        Some(parent_thread_id),
         &SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id,
             depth: 1,
@@ -518,7 +562,6 @@ fn turn_metadata_state_merges_client_metadata_without_replacing_reserved_fields(
             agent_nickname: None,
             agent_role: None,
         }),
-        Some(ThreadSource::User),
         "turn-a".to_string(),
         cwd,
         &permission_profile,
@@ -528,6 +571,7 @@ fn turn_metadata_state_merges_client_metadata_without_replacing_reserved_fields(
     state.set_responsesapi_client_metadata(HashMap::from([
         ("fiber_run_id".to_string(), "fiber-123".to_string()),
         ("origin".to_string(), "東京".to_string()),
+        ("workspace_kind".to_string(), "projectless".to_string()),
         ("model".to_string(), "client-supplied".to_string()),
         (
             "reasoning_effort".to_string(),
@@ -535,6 +579,19 @@ fn turn_metadata_state_merges_client_metadata_without_replacing_reserved_fields(
         ),
         ("session_id".to_string(), "client-supplied".to_string()),
         ("thread_id".to_string(), "client-supplied".to_string()),
+        ("installation_id".to_string(), "client-supplied".to_string()),
+        (
+            "x-codex-installation-id".to_string(),
+            "client-supplied".to_string(),
+        ),
+        (
+            "x-codex-parent-thread-id".to_string(),
+            "client-supplied".to_string(),
+        ),
+        (
+            "x-openai-subagent".to_string(),
+            "client-supplied".to_string(),
+        ),
         (
             "forked_from_thread_id".to_string(),
             "client-supplied".to_string(),
@@ -555,17 +612,22 @@ fn turn_metadata_state_merges_client_metadata_without_replacing_reserved_fields(
     ]));
     state.set_turn_started_at_unix_ms(/*turn_started_at_unix_ms*/ 1_700_000_000_123);
 
-    let header = state.current_header_value().expect("header");
+    let header = test_turn_metadata_header(&state);
     assert!(header.is_ascii());
     assert!(!header.contains("東京"));
     let json: Value = serde_json::from_str(&header).expect("json");
 
     assert_eq!(json["fiber_run_id"].as_str(), Some("fiber-123"));
     assert_eq!(json["origin"].as_str(), Some("東京"));
+    assert_eq!(json["workspace_kind"].as_str(), Some("projectless"));
     assert_eq!(json["model"].as_str(), Some("client-supplied"));
     assert_eq!(json["reasoning_effort"].as_str(), Some("client-supplied"));
     assert_eq!(json["session_id"].as_str(), Some("session-a"));
     assert_eq!(json["thread_id"].as_str(), Some("thread-a"));
+    assert!(json.get(INSTALLATION_ID_KEY).is_none());
+    assert!(json.get("x-codex-installation-id").is_none());
+    assert!(json.get("x-codex-parent-thread-id").is_none());
+    assert!(json.get("x-openai-subagent").is_none());
     assert_eq!(
         json["forked_from_thread_id"].as_str(),
         Some("44444444-4444-4444-8444-444444444444")
@@ -575,7 +637,7 @@ fn turn_metadata_state_merges_client_metadata_without_replacing_reserved_fields(
         Some("55555555-5555-4555-8555-555555555555")
     );
     assert_eq!(json["subagent_kind"].as_str(), Some("thread_spawn"));
-    assert_eq!(json["thread_source"].as_str(), Some("user"));
+    assert_eq!(json["thread_source"].as_str(), Some("client-supplied"));
     assert_eq!(json["turn_id"].as_str(), Some("turn-a"));
     assert!(json.get("request_kind").is_none());
     assert!(json.get(WINDOW_ID_KEY).is_none());
@@ -584,12 +646,14 @@ fn turn_metadata_state_merges_client_metadata_without_replacing_reserved_fields(
         Some(1_700_000_000_123)
     );
 
-    let model_request_header = state
-        .current_header_value_for_model_request("thread-a:1")
-        .expect("model request header");
+    let model_request_header = test_turn_responses_metadata_json(&state, "thread-a:1");
     let model_request_json: Value =
         serde_json::from_str(&model_request_header).expect("model request json");
     assert_eq!(model_request_json["request_kind"].as_str(), Some("turn"));
+    assert_eq!(
+        model_request_json[INSTALLATION_ID_KEY].as_str(),
+        Some("installation-a")
+    );
     assert_eq!(
         model_request_json[WINDOW_ID_KEY].as_str(),
         Some("thread-a:1")
@@ -601,6 +665,7 @@ fn turn_metadata_state_merges_client_metadata_without_replacing_reserved_fields(
     assert_eq!(meta["model"].as_str(), Some("gpt-5.4"));
     assert_eq!(meta["reasoning_effort"].as_str(), Some("high"));
     assert!(meta.get(WINDOW_ID_KEY).is_none());
+    assert_eq!(state.workspace_kind().as_deref(), Some("projectless"));
 }
 
 #[test]
@@ -612,8 +677,8 @@ fn turn_metadata_state_overlays_compaction_only_on_compaction_requests() {
         "session-a".to_string(),
         "thread-a".to_string(),
         /*forked_from_thread_id*/ None,
+        /*parent_thread_id*/ None,
         &SessionSource::Exec,
-        Some(ThreadSource::User),
         "turn-a".to_string(),
         cwd,
         &permission_profile,
@@ -625,17 +690,16 @@ fn turn_metadata_state_overlays_compaction_only_on_compaction_requests() {
         "client-supplied".to_string(),
     )]));
 
-    let compact_header = state
-        .current_header_value_for_compaction(
-            "thread-a:2",
-            CompactionTurnMetadata::new(
-                CompactionTrigger::Auto,
-                CompactionReason::ContextLimit,
-                CompactionImplementation::ResponsesCompactionV2,
-                CompactionPhase::MidTurn,
-            ),
-        )
-        .expect("compact header");
+    let compact_header = test_compaction_responses_metadata_json(
+        &state,
+        "thread-a:2",
+        CompactionTurnMetadata::new(
+            CompactionTrigger::Auto,
+            CompactionReason::ContextLimit,
+            CompactionImplementation::ResponsesCompactionV2,
+            CompactionPhase::MidTurn,
+        ),
+    );
     let compact_json: Value = serde_json::from_str(&compact_header).expect("json");
     assert_eq!(compact_json["request_kind"].as_str(), Some("compaction"));
     assert_eq!(compact_json["turn_id"].as_str(), Some("turn-a"));
@@ -651,9 +715,7 @@ fn turn_metadata_state_overlays_compaction_only_on_compaction_requests() {
         })
     );
 
-    let regular_header = state
-        .current_header_value_for_model_request("thread-a:3")
-        .expect("regular header");
+    let regular_header = test_turn_responses_metadata_json(&state, "thread-a:3");
     let regular_json: Value = serde_json::from_str(&regular_header).expect("json");
     assert_eq!(regular_json["request_kind"].as_str(), Some("turn"));
     assert_eq!(regular_json[WINDOW_ID_KEY].as_str(), Some("thread-a:3"));
@@ -671,6 +733,7 @@ async fn turn_metadata_state_preserves_lineage_after_git_enrichment() {
         "session-a".to_string(),
         "thread-a".to_string(),
         Some(parent_thread_id),
+        Some(parent_thread_id),
         &SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id,
             depth: 1,
@@ -678,7 +741,6 @@ async fn turn_metadata_state_preserves_lineage_after_git_enrichment() {
             agent_nickname: None,
             agent_role: None,
         }),
-        Some(ThreadSource::Subagent),
         "turn-a".to_string(),
         repo_path,
         &permission_profile,
@@ -690,7 +752,7 @@ async fn turn_metadata_state_preserves_lineage_after_git_enrichment() {
 
     let json = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            let header = state.current_header_value().expect("header");
+            let header = test_turn_metadata_header(&state);
             let json: Value = serde_json::from_str(&header).expect("json");
             if json
                 .get("workspaces")

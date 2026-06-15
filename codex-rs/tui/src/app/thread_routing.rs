@@ -310,6 +310,7 @@ impl App {
                     thread_id,
                     thread_label,
                     call_id: params.item_id.clone(),
+                    environment_id: params.environment_id.clone(),
                     reason: params.reason.clone(),
                     permissions: params.permissions.clone().into(),
                 }),
@@ -497,11 +498,41 @@ impl App {
         op: &AppCommand,
     ) -> Result<bool> {
         match op {
-            AppCommand::Interrupt => {
+            AppCommand::Interrupt { .. } => {
                 if let Some(turn_id) = self.active_turn_id_for_thread(thread_id).await {
-                    app_server.turn_interrupt(thread_id, turn_id).await?;
+                    let mut interrupt_turn_id = turn_id;
+                    for retried_after_turn_mismatch in [false, true] {
+                        match app_server
+                            .turn_interrupt(thread_id, interrupt_turn_id.clone())
+                            .await
+                        {
+                            Ok(()) => return Ok(true),
+                            Err(error) if !retried_after_turn_mismatch => {
+                                let Some(actual_turn_id) = active_turn_interrupt_race(&error)
+                                else {
+                                    return Err(error).wrap_err("turn/interrupt failed in TUI");
+                                };
+                                if actual_turn_id == interrupt_turn_id {
+                                    return Err(error).wrap_err("turn/interrupt failed in TUI");
+                                }
+                                // Review flows can swap the active turn before the TUI processes
+                                // the corresponding notification. Retry once with the
+                                // server-reported turn id so Ctrl+C/Esc do not fatally exit on that
+                                // stale cache, but let lifecycle notifications own the cached
+                                // active turn id.
+                                interrupt_turn_id = actual_turn_id;
+                            }
+                            Err(error) => {
+                                return Err(error).wrap_err("turn/interrupt failed in TUI");
+                            }
+                        }
+                    }
+                    unreachable!("interrupt retry loop should return");
                 } else {
-                    app_server.startup_interrupt(thread_id).await?;
+                    app_server
+                        .startup_interrupt(thread_id)
+                        .await
+                        .wrap_err("turn/interrupt failed in TUI")?;
                 }
                 Ok(true)
             }
@@ -605,7 +636,7 @@ impl App {
                             permissions_override,
                             config.permissions.user_visible_workspace_roots(),
                             model.to_string(),
-                            *effort,
+                            effort.clone(),
                             *summary,
                             service_tier.clone(),
                             collaboration_mode.clone(),
@@ -651,29 +682,18 @@ impl App {
                 Ok(true)
             }
             AppCommand::Review { target } => {
-                app_server.review_start(thread_id, target.clone()).await?;
+                let response = app_server.review_start(thread_id, target.clone()).await?;
+                let review_thread_id = ThreadId::from_string(&response.review_thread_id)
+                    .wrap_err("review/start returned invalid review thread id")?;
+                let store = Arc::clone(&self.ensure_thread_channel(review_thread_id).store);
+                let mut store = store.lock().await;
+                store.active_turn_id = Some(response.turn.id);
                 Ok(true)
             }
             AppCommand::CleanBackgroundTerminals => {
                 app_server
                     .thread_background_terminals_clean(thread_id)
                     .await?;
-                Ok(true)
-            }
-            AppCommand::RealtimeConversationStart { transport, voice } => {
-                app_server
-                    .thread_realtime_start(thread_id, transport.clone(), voice.clone())
-                    .await?;
-                Ok(true)
-            }
-            AppCommand::RealtimeConversationAudio(frame) => {
-                app_server
-                    .thread_realtime_audio(thread_id, frame.clone())
-                    .await?;
-                Ok(true)
-            }
-            AppCommand::RealtimeConversationClose => {
-                app_server.thread_realtime_stop(thread_id).await?;
                 Ok(true)
             }
             AppCommand::RunUserShellCommand { command } => {
@@ -895,6 +915,14 @@ impl App {
         &mut self,
         notification: &ServerNotification,
     ) {
+        if let Some(activity) =
+            sub_agent_activity_item(notification).and_then(sub_agent_activity_display)
+        {
+            self.agent_navigation.record_sub_agent_activity(activity);
+            self.sync_active_agent_label();
+            return;
+        }
+
         let Some(receiver_thread_ids) = collab_receiver_thread_ids(notification) else {
             return;
         };
@@ -1260,6 +1288,7 @@ impl App {
         snapshot: ThreadEventSnapshot,
         resume_restored_queue: bool,
     ) {
+        self.refresh_mcp_startup_expected_servers_from_config();
         let should_buffer_replay = self.terminal_resize_reflow_enabled()
             && (!snapshot.turns.is_empty() || !snapshot.events.is_empty());
         if should_buffer_replay {
@@ -1341,6 +1370,7 @@ impl App {
     pub(super) fn handle_skills_list_response(&mut self, response: SkillsListResponse) {
         let cwd = self.chat_widget.config_ref().cwd.clone();
         let errors = errors_for_cwd(&cwd, &response);
+        let errors = self.skill_load_warnings.newly_active_errors(&errors);
         emit_skill_load_warnings(&self.app_event_tx, &errors);
         self.chat_widget.handle_skills_list_response(response);
     }

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use codex_protocol::models::AgentMessageInputContent;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::GuardianRiskLevel;
 use codex_protocol::protocol::GuardianUserAuthorization;
@@ -186,7 +187,7 @@ pub(crate) async fn build_guardian_prompt_items_with_parent_turn(
     push_text(headings.transcript_end.to_string());
     push_text(format!(
         "Reviewed Codex session id: {}\n",
-        session.conversation_id
+        session.thread_id
     ));
     if let Some(note) = omission_note {
         push_text(format!("\n{note}\n"));
@@ -451,6 +452,22 @@ pub(crate) fn collect_guardian_transcript_entries(
             }
             ResponseItem::Message { role, content, .. } if role == "assistant" => {
                 content_entry(GuardianTranscriptEntryKind::Assistant, content)
+            }
+            ResponseItem::AgentMessage {
+                author, content, ..
+            } => {
+                let text = content
+                    .iter()
+                    .filter_map(|content| match content {
+                        AgentMessageInputContent::InputText { text } => Some(text.as_str()),
+                        AgentMessageInputContent::EncryptedContent { .. } => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                (!text.trim().is_empty()).then(|| GuardianTranscriptEntry {
+                    kind: GuardianTranscriptEntryKind::Assistant,
+                    text: format!("Agent message from {author}:\n{text}"),
+                })
             }
             ResponseItem::LocalShellCall { action, .. } => serialized_entry(
                 GuardianTranscriptEntryKind::Tool("tool shell call".to_string()),

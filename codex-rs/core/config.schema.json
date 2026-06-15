@@ -102,6 +102,14 @@
       "additionalProperties": false,
       "description": "Config values for a single app/connector.",
       "properties": {
+        "approvals_reviewer": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ApprovalsReviewer"
+            }
+          ],
+          "description": "Reviewer for approval prompts from this app, overriding the thread default."
+        },
         "default_tools_approval_mode": {
           "allOf": [
             {
@@ -202,6 +210,14 @@
       "additionalProperties": false,
       "description": "Default settings that apply to all apps.",
       "properties": {
+        "approvals_reviewer": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ApprovalsReviewer"
+            }
+          ],
+          "description": "Reviewer for approval prompts unless overridden by per-app settings."
+        },
         "destructive_enabled": {
           "description": "Whether tools with `destructive_hint = true` are allowed by default.",
           "type": "boolean"
@@ -214,18 +230,6 @@
         "open_world_enabled": {
           "description": "Whether tools with `open_world_hint = true` are allowed by default.",
           "type": "boolean"
-        }
-      },
-      "type": "object"
-    },
-    "AppsMcpPathOverrideConfigToml": {
-      "additionalProperties": false,
-      "properties": {
-        "enabled": {
-          "type": "boolean"
-        },
-        "path": {
-          "type": "string"
         }
       },
       "type": "object"
@@ -347,6 +351,22 @@
       },
       "type": "object"
     },
+    "CodeModeConfigToml": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "excluded_tool_namespaces": {
+          "description": "Exact tool namespaces to omit from the code-mode nested tool surface.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
     "ConfigProfile": {
       "additionalProperties": false,
       "description": "Collection of common configuration options that a user can define as a unit in `config.toml`.",
@@ -384,7 +404,23 @@
               "type": "boolean"
             },
             "apps_mcp_path_override": {
-              "$ref": "#/definitions/FeatureToml_for_AppsMcpPathOverrideConfigToml"
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "enabled": {
+                      "type": "boolean"
+                    },
+                    "path": {
+                      "type": "string"
+                    }
+                  },
+                  "type": "object"
+                }
+              ]
             },
             "auth_elicitation": {
               "type": "boolean"
@@ -402,7 +438,7 @@
               "type": "boolean"
             },
             "code_mode": {
-              "type": "boolean"
+              "$ref": "#/definitions/FeatureToml_for_CodeModeConfigToml"
             },
             "code_mode_only": {
               "type": "boolean"
@@ -485,6 +521,9 @@
             "js_repl_tools_only": {
               "type": "boolean"
             },
+            "local_thread_store_compression": {
+              "type": "boolean"
+            },
             "memories": {
               "type": "boolean"
             },
@@ -545,7 +584,7 @@
             "request_rule": {
               "type": "boolean"
             },
-            "responses_websocket_response_processed": {
+            "resize_all_images": {
               "type": "boolean"
             },
             "responses_websockets": {
@@ -558,6 +597,9 @@
               "type": "boolean"
             },
             "search_tool": {
+              "type": "boolean"
+            },
+            "secret_auth_storage": {
               "type": "boolean"
             },
             "shell_snapshot": {
@@ -590,6 +632,12 @@
             "terminal_resize_reflow": {
               "type": "boolean"
             },
+            "terminal_visualization_instructions": {
+              "type": "boolean"
+            },
+            "token_budget": {
+              "type": "boolean"
+            },
             "tool_call_mcp_elicitation": {
               "type": "boolean"
             },
@@ -612,6 +660,9 @@
               "type": "boolean"
             },
             "unified_exec": {
+              "type": "boolean"
+            },
+            "unified_exec_zsh_fork": {
               "type": "boolean"
             },
             "use_legacy_landlock": {
@@ -806,13 +857,13 @@
       },
       "type": "object"
     },
-    "FeatureToml_for_AppsMcpPathOverrideConfigToml": {
+    "FeatureToml_for_CodeModeConfigToml": {
       "anyOf": [
         {
           "type": "boolean"
         },
         {
-          "$ref": "#/definitions/AppsMcpPathOverrideConfigToml"
+          "$ref": "#/definitions/CodeModeConfigToml"
         }
       ]
     },
@@ -2402,6 +2453,13 @@
       },
       "type": "object"
     },
+    "RealtimeConversationArchitecture": {
+      "enum": [
+        "realtimeapi",
+        "avas"
+      ],
+      "type": "string"
+    },
     "RealtimeConversationVersion": {
       "enum": [
         "v1",
@@ -2412,6 +2470,9 @@
     "RealtimeToml": {
       "additionalProperties": false,
       "properties": {
+        "architecture": {
+          "$ref": "#/definitions/RealtimeConversationArchitecture"
+        },
         "transport": {
           "$ref": "#/definitions/RealtimeTransport"
         },
@@ -2466,15 +2527,8 @@
       "type": "string"
     },
     "ReasoningEffort": {
-      "description": "See https://platform.openai.com/docs/guides/reasoning?api-mode=responses#get-started-with-reasoning",
-      "enum": [
-        "none",
-        "minimal",
-        "low",
-        "medium",
-        "high",
-        "xhigh"
-      ],
+      "description": "A non-empty reasoning effort value advertised by the model.",
+      "minLength": 1,
       "type": "string"
     },
     "ReasoningSummary": {
@@ -4455,6 +4509,10 @@
       "description": "Experimental / do not use. Replaces the built-in realtime start instructions inserted into developer messages when realtime becomes active.",
       "type": "string"
     },
+    "experimental_realtime_webrtc_call_base_url": {
+      "description": "Experimental / do not use. Overrides only the WebRTC realtime call creation base URL. This is separate from `experimental_realtime_ws_base_url` because WebRTC call creation is HTTP, while sideband control is websocket.",
+      "type": "string"
+    },
     "experimental_realtime_ws_backend_prompt": {
       "description": "Experimental / do not use. Overrides only the realtime conversation websocket transport instructions (the `Op::RealtimeConversation` `/ws` session.update instructions) without changing normal prompts.",
       "type": "string"
@@ -4501,7 +4559,23 @@
           "type": "boolean"
         },
         "apps_mcp_path_override": {
-          "$ref": "#/definitions/FeatureToml_for_AppsMcpPathOverrideConfigToml"
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "path": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            }
+          ]
         },
         "auth_elicitation": {
           "type": "boolean"
@@ -4519,7 +4593,7 @@
           "type": "boolean"
         },
         "code_mode": {
-          "type": "boolean"
+          "$ref": "#/definitions/FeatureToml_for_CodeModeConfigToml"
         },
         "code_mode_only": {
           "type": "boolean"
@@ -4602,6 +4676,9 @@
         "js_repl_tools_only": {
           "type": "boolean"
         },
+        "local_thread_store_compression": {
+          "type": "boolean"
+        },
         "memories": {
           "type": "boolean"
         },
@@ -4662,7 +4739,7 @@
         "request_rule": {
           "type": "boolean"
         },
-        "responses_websocket_response_processed": {
+        "resize_all_images": {
           "type": "boolean"
         },
         "responses_websockets": {
@@ -4675,6 +4752,9 @@
           "type": "boolean"
         },
         "search_tool": {
+          "type": "boolean"
+        },
+        "secret_auth_storage": {
           "type": "boolean"
         },
         "shell_snapshot": {
@@ -4707,6 +4787,12 @@
         "terminal_resize_reflow": {
           "type": "boolean"
         },
+        "terminal_visualization_instructions": {
+          "type": "boolean"
+        },
+        "token_budget": {
+          "type": "boolean"
+        },
         "tool_call_mcp_elicitation": {
           "type": "boolean"
         },
@@ -4729,6 +4815,9 @@
           "type": "boolean"
         },
         "unified_exec": {
+          "type": "boolean"
+        },
+        "unified_exec_zsh_fork": {
           "type": "boolean"
         },
         "use_legacy_landlock": {

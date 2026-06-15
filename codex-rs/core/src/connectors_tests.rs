@@ -5,13 +5,14 @@ use codex_config::AppRequirementToml;
 use codex_config::AppToolRequirementToml;
 use codex_config::AppToolsRequirementsToml;
 use codex_config::AppsRequirementsToml;
-use codex_config::CloudRequirementsLoader;
 use codex_config::ConfigLayerStack;
 use codex_config::ConfigRequirements;
 use codex_config::ConfigRequirementsToml;
+use codex_config::test_support::CloudConfigBundleFixture;
 use codex_config::types::AppConfig;
 use codex_config::types::AppToolConfig;
 use codex_config::types::AppToolsConfig;
+use codex_config::types::ApprovalsReviewer;
 use codex_config::types::AppsDefaultConfig;
 use codex_connectors::merge::plugin_connector_to_app_info;
 use codex_connectors::metadata::connector_install_url;
@@ -268,6 +269,7 @@ fn app_tool_policy_uses_global_defaults_for_destructive_hints() {
     let apps_config = AppsConfigToml {
         default: Some(AppsDefaultConfig {
             enabled: true,
+            approvals_reviewer: None,
             destructive_enabled: false,
             open_world_enabled: true,
         }),
@@ -297,6 +299,7 @@ fn app_tool_policy_defaults_missing_destructive_hint_to_true() {
     let apps_config = AppsConfigToml {
         default: Some(AppsDefaultConfig {
             enabled: true,
+            approvals_reviewer: None,
             destructive_enabled: false,
             open_world_enabled: true,
         }),
@@ -326,6 +329,7 @@ fn app_tool_policy_defaults_missing_open_world_hint_to_true() {
     let apps_config = AppsConfigToml {
         default: Some(AppsDefaultConfig {
             enabled: true,
+            approvals_reviewer: None,
             destructive_enabled: true,
             open_world_enabled: false,
         }),
@@ -355,6 +359,7 @@ fn app_is_enabled_uses_default_for_unconfigured_apps() {
     let apps_config = AppsConfigToml {
         default: Some(AppsDefaultConfig {
             enabled: false,
+            approvals_reviewer: None,
             destructive_enabled: true,
             open_world_enabled: true,
         }),
@@ -370,6 +375,7 @@ fn app_is_enabled_prefers_per_app_override_over_default() {
     let apps_config = AppsConfigToml {
         default: Some(AppsDefaultConfig {
             enabled: false,
+            approvals_reviewer: None,
             destructive_enabled: true,
             open_world_enabled: true,
         }),
@@ -377,6 +383,7 @@ fn app_is_enabled_prefers_per_app_override_over_default() {
             "calendar".to_string(),
             AppConfig {
                 enabled: true,
+                approvals_reviewer: None,
                 destructive_enabled: None,
                 open_world_enabled: None,
                 default_tools_approval_mode: None,
@@ -388,6 +395,131 @@ fn app_is_enabled_prefers_per_app_override_over_default() {
 
     assert!(app_is_enabled(&apps_config, Some("calendar")));
     assert!(!app_is_enabled(&apps_config, Some("drive")));
+}
+
+#[tokio::test]
+async fn app_approvals_reviewer_uses_app_then_default_then_global() {
+    for (global, app_default, app, expected_global, expected_default, expected_app) in [
+        (
+            "user",
+            "auto_review",
+            "user",
+            ApprovalsReviewer::User,
+            ApprovalsReviewer::AutoReview,
+            ApprovalsReviewer::User,
+        ),
+        (
+            "auto_review",
+            "user",
+            "auto_review",
+            ApprovalsReviewer::AutoReview,
+            ApprovalsReviewer::User,
+            ApprovalsReviewer::AutoReview,
+        ),
+    ] {
+        let codex_home = tempdir().expect("tempdir should succeed");
+        std::fs::write(
+            codex_home.path().join(CONFIG_TOML_FILE),
+            format!(
+                r#"
+approvals_reviewer = "{global}"
+
+[apps._default]
+approvals_reviewer = "{app_default}"
+
+[apps.calendar]
+approvals_reviewer = "{app}"
+"#
+            ),
+        )
+        .expect("write config");
+        let config = ConfigBuilder::default()
+            .codex_home(codex_home.path().to_path_buf())
+            .build()
+            .await
+            .expect("config should build");
+
+        assert_eq!(
+            mcp_approvals_reviewer(&config, CODEX_APPS_MCP_SERVER_NAME, Some("calendar")),
+            expected_app
+        );
+        assert_eq!(
+            mcp_approvals_reviewer(&config, CODEX_APPS_MCP_SERVER_NAME, Some("drive")),
+            expected_default
+        );
+        assert_eq!(
+            mcp_approvals_reviewer(
+                &config,
+                CODEX_APPS_MCP_SERVER_NAME,
+                /*connector_id*/ None
+            ),
+            expected_default
+        );
+        assert_eq!(
+            mcp_approvals_reviewer(&config, "custom_server", Some("calendar")),
+            expected_global
+        );
+    }
+}
+
+#[tokio::test]
+async fn default_app_approvals_reviewer_respects_global_reviewer_requirements() {
+    let codex_home = tempdir().expect("tempdir should succeed");
+    std::fs::write(
+        codex_home.path().join(CONFIG_TOML_FILE),
+        r#"
+approvals_reviewer = "auto_review"
+
+[apps._default]
+approvals_reviewer = "user"
+"#,
+    )
+    .expect("write config");
+    let config = ConfigBuilder::default()
+        .codex_home(codex_home.path().to_path_buf())
+        .cloud_config_bundle(
+            CloudConfigBundleFixture::loader_with_enterprise_requirement(
+                r#"allowed_approvals_reviewers = ["auto_review"]"#,
+            ),
+        )
+        .build()
+        .await
+        .expect("config should build");
+
+    assert_eq!(
+        mcp_approvals_reviewer(&config, CODEX_APPS_MCP_SERVER_NAME, Some("calendar")),
+        ApprovalsReviewer::AutoReview
+    );
+}
+
+#[tokio::test]
+async fn app_approvals_reviewer_respects_global_reviewer_requirements() {
+    let codex_home = tempdir().expect("tempdir should succeed");
+    std::fs::write(
+        codex_home.path().join(CONFIG_TOML_FILE),
+        r#"
+approvals_reviewer = "auto_review"
+
+[apps.calendar]
+approvals_reviewer = "user"
+"#,
+    )
+    .expect("write config");
+    let config = ConfigBuilder::default()
+        .codex_home(codex_home.path().to_path_buf())
+        .cloud_config_bundle(
+            CloudConfigBundleFixture::loader_with_enterprise_requirement(
+                r#"allowed_approvals_reviewers = ["auto_review"]"#,
+            ),
+        )
+        .build()
+        .await
+        .expect("config should build");
+
+    assert_eq!(
+        mcp_approvals_reviewer(&config, CODEX_APPS_MCP_SERVER_NAME, Some("calendar")),
+        ApprovalsReviewer::AutoReview
+    );
 }
 
 #[test]
@@ -457,7 +589,7 @@ fn requirements_enabled_does_not_override_disabled_connector() {
 }
 
 #[tokio::test]
-async fn cloud_requirements_disable_connector_overrides_user_apps_config() {
+async fn cloud_config_bundle_disable_connector_overrides_user_apps_config() {
     let codex_home = tempdir().expect("tempdir should succeed");
     std::fs::write(
         codex_home.path().join(CONFIG_TOML_FILE),
@@ -468,25 +600,17 @@ enabled = true
     )
     .expect("write config");
 
-    let requirements = ConfigRequirementsToml {
-        apps: Some(AppsRequirementsToml {
-            apps: BTreeMap::from([(
-                "connector_123123".to_string(),
-                AppRequirementToml {
-                    enabled: Some(false),
-                    tools: None,
-                },
-            )]),
-        }),
-        ..Default::default()
-    };
-
     let config = ConfigBuilder::default()
         .codex_home(codex_home.path().to_path_buf())
         .fallback_cwd(Some(codex_home.path().to_path_buf()))
-        .cloud_requirements(CloudRequirementsLoader::new(async move {
-            Ok(Some(requirements))
-        }))
+        .cloud_config_bundle(
+            CloudConfigBundleFixture::loader_with_enterprise_requirement(
+                r#"
+[apps.connector_123123]
+enabled = false
+"#,
+            ),
+        )
         .build()
         .await
         .expect("config should build");
@@ -508,29 +632,21 @@ enabled = true
 }
 
 #[tokio::test]
-async fn cloud_requirements_disable_connector_applies_without_user_apps_table() {
+async fn cloud_config_bundle_disable_connector_applies_without_user_apps_table() {
     let codex_home = tempdir().expect("tempdir should succeed");
     std::fs::write(codex_home.path().join(CONFIG_TOML_FILE), "").expect("write config");
-
-    let requirements = ConfigRequirementsToml {
-        apps: Some(AppsRequirementsToml {
-            apps: BTreeMap::from([(
-                "connector_123123".to_string(),
-                AppRequirementToml {
-                    enabled: Some(false),
-                    tools: None,
-                },
-            )]),
-        }),
-        ..Default::default()
-    };
 
     let config = ConfigBuilder::default()
         .codex_home(codex_home.path().to_path_buf())
         .fallback_cwd(Some(codex_home.path().to_path_buf()))
-        .cloud_requirements(CloudRequirementsLoader::new(async move {
-            Ok(Some(requirements))
-        }))
+        .cloud_config_bundle(
+            CloudConfigBundleFixture::loader_with_enterprise_requirement(
+                r#"
+[apps.connector_123123]
+enabled = false
+"#,
+            ),
+        )
         .build()
         .await
         .expect("config should build");
@@ -690,6 +806,7 @@ fn app_tool_policy_honors_default_app_enabled_false() {
     let apps_config = AppsConfigToml {
         default: Some(AppsDefaultConfig {
             enabled: false,
+            approvals_reviewer: None,
             destructive_enabled: true,
             open_world_enabled: true,
         }),
@@ -786,7 +903,7 @@ fn managed_app_tool_approval_uses_raw_tool_name() {
 }
 
 #[tokio::test]
-async fn cloud_requirements_tool_approval_overrides_user_apps_config() {
+async fn cloud_config_bundle_tool_approval_overrides_user_apps_config() {
     let codex_home = tempdir().expect("tempdir should succeed");
     std::fs::write(
         codex_home.path().join(CONFIG_TOML_FILE),
@@ -797,21 +914,17 @@ approval_mode = "prompt"
     )
     .expect("write config");
 
-    let requirements = ConfigRequirementsToml {
-        apps: Some(app_tool_requirements(
-            "connector_123123",
-            "calendar/list_events",
-            AppToolApproval::Approve,
-        )),
-        ..Default::default()
-    };
-
     let config = ConfigBuilder::default()
         .codex_home(codex_home.path().to_path_buf())
         .fallback_cwd(Some(codex_home.path().to_path_buf()))
-        .cloud_requirements(CloudRequirementsLoader::new(async move {
-            Ok(Some(requirements))
-        }))
+        .cloud_config_bundle(
+            CloudConfigBundleFixture::loader_with_enterprise_requirement(
+                r#"
+[apps.connector_123123.tools."calendar/list_events"]
+approval_mode = "approve"
+"#,
+            ),
+        )
         .build()
         .await
         .expect("config should build");
@@ -925,6 +1038,7 @@ fn app_tool_policy_allows_per_app_enable_when_default_is_disabled() {
     let apps_config = AppsConfigToml {
         default: Some(AppsDefaultConfig {
             enabled: false,
+            approvals_reviewer: None,
             destructive_enabled: true,
             open_world_enabled: true,
         }),
@@ -932,6 +1046,7 @@ fn app_tool_policy_allows_per_app_enable_when_default_is_disabled() {
             "calendar".to_string(),
             AppConfig {
                 enabled: true,
+                approvals_reviewer: None,
                 destructive_enabled: None,
                 open_world_enabled: None,
                 default_tools_approval_mode: None,
@@ -969,6 +1084,7 @@ fn app_tool_policy_per_tool_enabled_true_overrides_app_level_disable_flags() {
             "calendar".to_string(),
             AppConfig {
                 enabled: true,
+                approvals_reviewer: None,
                 destructive_enabled: Some(false),
                 open_world_enabled: Some(false),
                 default_tools_approval_mode: None,
@@ -1012,6 +1128,7 @@ fn app_tool_policy_default_tools_enabled_true_overrides_app_level_tool_hints() {
             "calendar".to_string(),
             AppConfig {
                 enabled: true,
+                approvals_reviewer: None,
                 destructive_enabled: Some(false),
                 open_world_enabled: Some(false),
                 default_tools_approval_mode: None,
@@ -1047,6 +1164,7 @@ fn app_tool_policy_default_tools_enabled_false_overrides_app_level_tool_hints() 
             "calendar".to_string(),
             AppConfig {
                 enabled: true,
+                approvals_reviewer: None,
                 destructive_enabled: Some(true),
                 open_world_enabled: Some(true),
                 default_tools_approval_mode: Some(AppToolApproval::Approve),
@@ -1084,6 +1202,7 @@ fn app_tool_policy_uses_default_tools_approval_mode() {
             "calendar".to_string(),
             AppConfig {
                 enabled: true,
+                approvals_reviewer: None,
                 destructive_enabled: None,
                 open_world_enabled: None,
                 default_tools_approval_mode: Some(AppToolApproval::Prompt),
@@ -1123,6 +1242,7 @@ fn app_tool_policy_matches_prefix_stripped_tool_name_for_tool_config() {
             "calendar".to_string(),
             AppConfig {
                 enabled: true,
+                approvals_reviewer: None,
                 destructive_enabled: Some(false),
                 open_world_enabled: Some(false),
                 default_tools_approval_mode: Some(AppToolApproval::Auto),
@@ -1236,11 +1356,17 @@ discoverables = [
         .await
         .expect("config should load");
     let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
+    let plugins_manager = PluginsManager::new(config.codex_home.to_path_buf());
 
-    let discoverable_tools =
-        list_tool_suggest_discoverable_tools_with_auth(&config, Some(&auth), &[], &[])
-            .await
-            .expect("discoverable tools should load");
+    let discoverable_tools = list_tool_suggest_discoverable_tools_with_auth(
+        &config,
+        &plugins_manager,
+        Some(&auth),
+        &[],
+        &[],
+    )
+    .await
+    .expect("discoverable tools should load");
 
     assert_eq!(
         discoverable_tools,
@@ -1268,9 +1394,11 @@ apps = true
         .expect("config should load");
     let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
     let loaded_plugin_app_connector_ids = vec!["asdk_app_databricks_workspace".to_string()];
+    let plugins_manager = PluginsManager::new(config.codex_home.to_path_buf());
 
     let discoverable_tools = list_tool_suggest_discoverable_tools_with_auth(
         &config,
+        &plugins_manager,
         Some(&auth),
         &[],
         &loaded_plugin_app_connector_ids,
