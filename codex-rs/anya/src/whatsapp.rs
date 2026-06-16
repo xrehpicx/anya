@@ -2425,9 +2425,25 @@ async function replyText(sock, remoteJid, message, text, options = {}) {
   await sendMessageWithRetry(sock, remoteJid, { text }, sendOptions, { required: false });
 }
 
+function stripTerminalFormatting(text) {
+  return String(text || '')
+    .replace(/\x1B\][\s\S]*?(?:\x07|\x1B\\)/g, '')
+    .replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '')
+    .replace(/\r/g, '');
+}
+
+function redactDeviceLoginOutput(text) {
+  return stripTerminalFormatting(text)
+    .replace(/\b[A-Z0-9]{4}[-\s][A-Z0-9]{4,8}\b/g, '<device-code>')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 500);
+}
+
 function deviceLoginPromptFromOutput(output) {
-  const url = output.match(/https:\/\/auth\.openai\.com\/codex\/device\b/)?.[0];
-  const code = output.match(/\b[A-Z0-9]{4}-[A-Z0-9]{4,8}\b/)?.[0];
+  const clean = stripTerminalFormatting(output);
+  const url = clean.match(/https:\/\/auth\.openai\.com\/codex\/device\b/)?.[0];
+  const code = clean.match(/\b[A-Z0-9]{4}[-\s][A-Z0-9]{4,8}\b/)?.[0]?.replace(/\s+/, '-');
   if (!url || !code) return null;
   return { url, code };
 }
@@ -2524,6 +2540,7 @@ async function runDeviceLoginFromWhatsapp(sock, remoteJid, message) {
       timeout.unref?.();
       promptTimer = setTimeout(() => {
         if (sentPrompt || settled) return;
+        console.error(`Anya WhatsApp login prompt parse failed for ${anyaBinary}: ${redactDeviceLoginOutput(output) || '<no output>'}`);
         stopChild();
         settled = true;
         clearTimeout(timeout);
@@ -3477,6 +3494,9 @@ mod tests {
         assert!(BRIDGE_MJS.contains("Send /login in this WhatsApp chat"));
         assert!(BRIDGE_MJS.contains("function runDeviceLoginFromWhatsapp"));
         assert!(BRIDGE_MJS.contains("function sendDeviceLoginPrompt"));
+        assert!(BRIDGE_MJS.contains("function stripTerminalFormatting"));
+        assert!(BRIDGE_MJS.contains("function redactDeviceLoginOutput"));
+        assert!(BRIDGE_MJS.contains("login prompt parse failed"));
         assert!(BRIDGE_MJS.contains("function runUpdateFromWhatsapp"));
         assert!(BRIDGE_MJS.contains("--notify-channel"));
         assert!(BRIDGE_MJS.contains("Anya update completed and the service is back online."));
@@ -3484,7 +3504,7 @@ mod tests {
         assert!(BRIDGE_MJS.contains("prompt.code"));
         assert!(BRIDGE_MJS.contains("Enter this code:"));
         assert!(BRIDGE_MJS.contains("could not read the OpenAI device URL and code"));
-        assert!(BRIDGE_MJS.contains("[A-Z0-9]{4}-[A-Z0-9]{4,8}"));
+        assert!(BRIDGE_MJS.contains("[A-Z0-9]{4}[-\\s][A-Z0-9]{4,8}"));
         assert!(BRIDGE_MJS.contains("function scheduleServiceRestart"));
         assert!(BRIDGE_MJS.contains("systemd-run"));
     }
