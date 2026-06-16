@@ -472,7 +472,7 @@ async fn auth_status(args: AuthStatusArgs) -> Result<()> {
         Ok(Ok(reply)) => {
             println!("Auth probe: completed");
             println!("Unexpected reply: {}", reply.trim());
-            Ok(())
+            anyhow::bail!("auth probe returned unexpected reply: {}", reply.trim())
         }
         Ok(Err(error)) => {
             print_auth_failure_hint(&error);

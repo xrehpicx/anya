@@ -818,6 +818,22 @@ const commandTimeoutMs = parseTimeout(
   process.env.ANYA_WHATSAPP_COMMAND_TIMEOUT_MS,
   30_000
 );
+const deviceLoginTimeoutMs = parseTimeout(
+  process.env.ANYA_WHATSAPP_DEVICE_LOGIN_TIMEOUT_MS,
+  16 * 60 * 1000
+);
+const authPreflightTtlMs = parseTimeout(
+  process.env.ANYA_WHATSAPP_AUTH_PREFLIGHT_TTL_MS,
+  5 * 60 * 1000
+);
+const authPreflightFailureTtlMs = parseTimeout(
+  process.env.ANYA_WHATSAPP_AUTH_PREFLIGHT_FAILURE_TTL_MS,
+  60_000
+);
+const authPreflightTimeoutMs = parseTimeout(
+  process.env.ANYA_WHATSAPP_AUTH_PREFLIGHT_TIMEOUT_MS,
+  25_000
+);
 const replyTimeoutMs = parseOptionalTimeout(process.env.ANYA_WHATSAPP_REPLY_TIMEOUT_MS);
 const transcribeAudio = parseBoolEnv(process.env.ANYA_WHATSAPP_TRANSCRIBE_AUDIO, true);
 const transcribeTimeoutMs = parseTimeout(
@@ -857,6 +873,13 @@ const knownContacts = new Map();
 const knownChats = new Map();
 const temporaryInboundAllows = new Map();
 const pendingHistoryReads = new Map();
+let activeDeviceLogin = false;
+let authPreflight = {
+  okUntil: 0,
+  failureUntil: 0,
+  failure: null,
+  pending: null,
+};
 let channelSettings = loadChannelSettings();
 let messageLog = loadMessageLog();
 let bridgeNotices = loadBridgeNotices();
@@ -2298,7 +2321,7 @@ function parseSlashCommand(text) {
 }
 
 function isChannelSlashCommand(command) {
-  return ['new', 'reset', 'stop', 'status', 'help', 'reply', 'models', 'model', 'effort', 'thinking', 'fast', 'service-tier', 'settings'].includes(command?.name);
+  return ['new', 'reset', 'stop', 'status', 'auth', 'login', 'restart', 'help', 'reply', 'models', 'model', 'effort', 'thinking', 'fast', 'service-tier', 'settings'].includes(command?.name);
 }
 
 function stopActiveRun(channel) {
@@ -2316,15 +2339,67 @@ function formatAnyaError(error) {
     message.includes('401 Unauthorized') ||
     message.includes('Unauthorized')
   ) {
-    return 'Anya needs a fresh Codex login on this server. Run: anya login --device-auth';
+    return 'Anya needs a fresh Codex login. Send /login in this WhatsApp chat.';
   }
   if (message.includes('timed out')) {
-    return 'Anya timed out waiting for Codex. Run: anya auth status';
+    return 'Anya timed out waiting for Codex. Send /auth to check the live auth state.';
+  }
+  if (message.includes('auth probe returned unexpected reply')) {
+    return 'Anya auth exists, but Codex did not return a usable reply. Send /login to refresh auth.';
   }
   if (message.includes('failed to load configuration') || message.includes('Model provider')) {
     return `Anya configuration error: ${message}`;
   }
   return `Anya error: ${message}`;
+}
+
+function isAuthFailure(error) {
+  const message = error?.message || String(error);
+  return (
+    message.includes('token_invalidated') ||
+    message.includes('refresh_token') ||
+    message.includes('401 Unauthorized') ||
+    message.includes('Unauthorized') ||
+    message.includes('auth probe returned unexpected reply')
+  );
+}
+
+function rememberAuthFailure(error) {
+  if (!isAuthFailure(error)) return;
+  authPreflight.okUntil = 0;
+  authPreflight.failure = error;
+  authPreflight.failureUntil = Date.now() + authPreflightFailureTtlMs;
+}
+
+async function ensureCodexAuthReady() {
+  const now = Date.now();
+  if (authPreflight.okUntil > now) return;
+  if (authPreflight.failure && authPreflight.failureUntil > now) {
+    throw authPreflight.failure;
+  }
+  if (authPreflight.pending) return authPreflight.pending;
+
+  authPreflight.pending = runAnya([
+    'auth',
+    'status',
+    '--endpoint',
+    endpoint,
+    '--timeout-secs',
+    String(Math.max(1, Math.ceil(authPreflightTimeoutMs / 1000))),
+  ], {
+    timeoutMs: authPreflightTimeoutMs + 5_000,
+  }).then(() => {
+    authPreflight.okUntil = Date.now() + authPreflightTtlMs;
+    authPreflight.failureUntil = 0;
+    authPreflight.failure = null;
+  }).catch((error) => {
+    rememberAuthFailure(error);
+    throw error;
+  }).finally(() => {
+    authPreflight.pending = null;
+  });
+
+  return authPreflight.pending;
 }
 
 function isStoppedError(error) {
@@ -2339,6 +2414,140 @@ function isThreadNotFoundError(error) {
 async function replyText(sock, remoteJid, message, text, options = {}) {
   const sendOptions = options.quoted ? { quoted: message } : undefined;
   await sendMessageWithRetry(sock, remoteJid, { text }, sendOptions, { required: false });
+}
+
+function deviceLoginPromptFromOutput(output) {
+  const url = output.match(/https:\/\/auth\.openai\.com\/codex\/device\b/)?.[0];
+  const code = output.match(/\b[A-Z0-9]{4}-[A-Z0-9]{4}\b/)?.[0];
+  if (!url || !code) return null;
+  return [
+    'Anya needs a fresh Codex login.',
+    '',
+    `Open: ${url}`,
+    `Code: ${code}`,
+    '',
+    'I will wait here and restart the service after login succeeds.',
+  ].join('\n');
+}
+
+function scheduleServiceRestart() {
+  const unit = `anya-self-restart-${Date.now()}`;
+  const child = spawn('systemd-run', [
+    '--user',
+    `--unit=${unit}`,
+    '--on-active=2s',
+    'systemctl',
+    '--user',
+    'restart',
+    'anya.service',
+  ], {
+    stdio: 'ignore',
+  });
+  let fallbackStarted = false;
+  const fallback = () => {
+    if (fallbackStarted) return;
+    fallbackStarted = true;
+    const fallback = spawn('sh', [
+      '-lc',
+      '(sleep 2; systemctl --user restart anya.service) >/dev/null 2>&1 &',
+    ], {
+      detached: true,
+      stdio: 'ignore',
+    });
+    fallback.unref?.();
+  };
+  child.on('error', fallback);
+  child.on('close', (code) => {
+    if (code !== 0) fallback();
+  });
+  child.unref?.();
+}
+
+async function runDeviceLoginFromWhatsapp(sock, remoteJid, message) {
+  if (activeDeviceLogin) {
+    await replyText(sock, remoteJid, message, 'A device login is already in progress.');
+    return;
+  }
+
+  activeDeviceLogin = true;
+  await replyText(sock, remoteJid, message, 'Starting Anya device login...');
+
+  let output = '';
+  let sentPrompt = false;
+  let promptSend = Promise.resolve();
+  const maybeSendPrompt = () => {
+    if (sentPrompt) return;
+    const prompt = deviceLoginPromptFromOutput(output);
+    if (!prompt) return;
+    sentPrompt = true;
+    promptSend = replyText(sock, remoteJid, message, prompt).catch((error) => {
+      console.error(`Anya WhatsApp login prompt send failed: ${error?.stack || error?.message || error}`);
+    });
+  };
+
+  try {
+    await new Promise((resolve, reject) => {
+      const child = spawn(anyaBinary, ['login', '--device-auth'], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let settled = false;
+      let sentSignal = false;
+      let killTimer;
+      const timeout = setTimeout(() => {
+        if (child.exitCode === null && !sentSignal) {
+          child.kill('SIGTERM');
+          sentSignal = true;
+          killTimer = setTimeout(() => {
+            if (child.exitCode === null) child.kill('SIGKILL');
+          }, 2_000);
+          killTimer.unref?.();
+        }
+        if (!settled) {
+          settled = true;
+          reject(new Error('Device login timed out. Send /login to try again.'));
+        }
+      }, deviceLoginTimeoutMs);
+      timeout.unref?.();
+
+      const onData = (chunk) => {
+        output += String(chunk);
+        if (output.length > 128 * 1024) {
+          output = output.slice(-128 * 1024);
+        }
+        maybeSendPrompt();
+      };
+      child.stdout.setEncoding('utf8');
+      child.stderr.setEncoding('utf8');
+      child.stdout.on('data', onData);
+      child.stderr.on('data', onData);
+      child.on('error', (error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        clearTimeout(killTimer);
+        reject(error);
+      });
+      child.on('close', (code, signal) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        clearTimeout(killTimer);
+        if (code === 0) {
+          resolve();
+          return;
+        }
+        reject(new Error(output.trim() || `anya login exited with ${code ?? signal}`));
+      });
+    });
+    await promptSend;
+    await replyText(sock, remoteJid, message, 'Anya login succeeded. Restarting the service now; retry your message in a few seconds.');
+    scheduleServiceRestart();
+  } catch (error) {
+    await promptSend;
+    await replyText(sock, remoteJid, message, formatAnyaError(error));
+  } finally {
+    activeDeviceLogin = false;
+  }
 }
 
 function lastRegexEnd(text, regex) {
@@ -2438,6 +2647,7 @@ async function streamPrompt(sock, remoteJid, message, channel, text, options = {
     flushTimer.unref?.();
   };
 
+  await ensureCodexAuthReady();
   sendPresence();
   const presenceInterval = setInterval(sendPresence, 15_000);
   presenceInterval.unref?.();
@@ -2492,6 +2702,7 @@ async function streamPromptWithRecovery(sock, remoteJid, message, channel, text,
   try {
     await streamPrompt(sock, remoteJid, message, channel, text, options);
   } catch (error) {
+    rememberAuthFailure(error);
     if (!isThreadNotFoundError(error)) throw error;
     await createChannelSession(remoteJid);
     await streamPrompt(sock, remoteJid, message, channel, text, options);
@@ -2570,6 +2781,12 @@ async function steerActiveRun(sock, remoteJid, message, channel, text, options =
 
 function steerActiveRunInBackground(sock, remoteJid, message, channel, text, options = {}) {
   void steerActiveRun(sock, remoteJid, message, channel, text, options).catch((error) => {
+    rememberAuthFailure(error);
+    if (isAuthFailure(error)) {
+      stopActiveRun(channel);
+      void replyText(sock, remoteJid, message, formatAnyaError(error));
+      return;
+    }
     console.error(`Anya WhatsApp steer error: ${error?.stack || error?.message || error}`);
   });
 }
@@ -2603,8 +2820,32 @@ async function handleSlashCommand(sock, remoteJid, message, command) {
         sock,
         remoteJid,
         message,
-        `Anya is connected. Channel: ${channel}. Active reply: ${activeRuns.has(channel) ? 'yes' : 'no'}. ${describeChannelSettings(channel)}`
+        `Anya is connected. Channel: ${channel}. Active reply: ${activeRuns.has(channel) ? 'yes' : 'no'}. Login flow: ${activeDeviceLogin ? 'running' : 'idle'}. ${describeChannelSettings(channel)} Send /auth to probe Codex auth or /login to refresh it.`
       );
+      return true;
+    case 'auth':
+      try {
+        const authOutput = await runAnya([
+          'auth',
+          'status',
+          '--endpoint',
+          endpoint,
+          '--timeout-secs',
+          '20',
+        ], {
+          timeoutMs: 25_000,
+        });
+        await replyText(sock, remoteJid, message, authOutput.trim() || 'Auth probe completed with no output.');
+      } catch (error) {
+        await replyText(sock, remoteJid, message, formatAnyaError(error));
+      }
+      return true;
+    case 'login':
+      await runDeviceLoginFromWhatsapp(sock, remoteJid, message);
+      return true;
+    case 'restart':
+      await replyText(sock, remoteJid, message, 'Restarting Anya service now; retry in a few seconds.');
+      scheduleServiceRestart();
       return true;
     case 'settings':
       await replyText(sock, remoteJid, message, describeChannelSettings(channel));
@@ -2706,7 +2947,7 @@ async function handleSlashCommand(sock, remoteJid, message, command) {
         sock,
         remoteJid,
         message,
-        'Anya commands: /new, /reset, /stop, /status, /models, /model, /thinking, /fast, /service-tier, /settings, /reply, /help. In groups, mention anya or start with /anya or /ask to chat.'
+        'Anya commands: /new, /reset, /stop, /status, /auth, /login, /restart, /models, /model, /thinking, /fast, /service-tier, /settings, /reply, /help. In groups, mention anya or start with /anya or /ask to chat.'
       );
       return true;
   }
@@ -2744,6 +2985,7 @@ async function handleMessage(sock, message) {
     try {
       await handleSlashCommand(sock, remoteJid, message, command);
     } catch (error) {
+      rememberAuthFailure(error);
       console.error(`Anya WhatsApp command error: ${error?.stack || error?.message || error}`);
       await replyText(sock, remoteJid, message, formatAnyaError(error));
     }
@@ -2762,6 +3004,7 @@ async function handleMessage(sock, message) {
       quotedMessageContext(message)
     );
     const images = attachment?.imageInput ? [attachment.path] : [];
+    await ensureCodexAuthReady();
     const channel = await ensureChannel(remoteJid);
     if (activeRuns.has(channel)) {
       steerActiveRunInBackground(sock, remoteJid, message, channel, prompt, { images });
@@ -2771,6 +3014,8 @@ async function handleMessage(sock, message) {
     await streamPromptWithRecovery(sock, remoteJid, message, channel, prompt, { images });
   } catch (error) {
     if (!isStoppedError(error)) {
+      rememberAuthFailure(error);
+      if (isAuthFailure(error)) stopActiveRun(channelName(remoteJid));
       console.error(`Anya WhatsApp message error: ${error?.stack || error?.message || error}`);
       await replyText(sock, remoteJid, message, formatAnyaError(error));
     }
@@ -3132,14 +3377,29 @@ mod tests {
     #[test]
     fn whatsapp_bridge_bounds_agent_runs() {
         assert!(BRIDGE_MJS.contains("ANYA_WHATSAPP_REPLY_TIMEOUT_MS"));
+        assert!(BRIDGE_MJS.contains("ANYA_WHATSAPP_DEVICE_LOGIN_TIMEOUT_MS"));
+        assert!(BRIDGE_MJS.contains("ANYA_WHATSAPP_AUTH_PREFLIGHT_TTL_MS"));
+        assert!(BRIDGE_MJS.contains("ANYA_WHATSAPP_AUTH_PREFLIGHT_FAILURE_TTL_MS"));
         assert!(BRIDGE_MJS.contains("activeRuns = new Map()"));
+        assert!(BRIDGE_MJS.contains("let activeDeviceLogin = false"));
+        assert!(BRIDGE_MJS.contains("authPreflight = {"));
+        assert!(BRIDGE_MJS.contains("function ensureCodexAuthReady"));
+        assert!(BRIDGE_MJS.contains("await ensureCodexAuthReady();"));
+        assert!(BRIDGE_MJS.contains("function rememberAuthFailure"));
         assert!(BRIDGE_MJS.contains("child.kill('SIGKILL')"));
         assert!(BRIDGE_MJS.contains("Anya needs a fresh Codex login"));
+        assert!(BRIDGE_MJS.contains("Send /login in this WhatsApp chat"));
+        assert!(BRIDGE_MJS.contains("function runDeviceLoginFromWhatsapp"));
+        assert!(BRIDGE_MJS.contains("function scheduleServiceRestart"));
+        assert!(BRIDGE_MJS.contains("systemd-run"));
     }
 
     #[test]
     fn whatsapp_bridge_handles_channel_slash_commands() {
         assert!(BRIDGE_MJS.contains("parseSlashCommand"));
+        assert!(BRIDGE_MJS.contains("'auth'"));
+        assert!(BRIDGE_MJS.contains("'login'"));
+        assert!(BRIDGE_MJS.contains("'restart'"));
         assert!(BRIDGE_MJS.contains("'models'"));
         assert!(BRIDGE_MJS.contains("'model'"));
         assert!(BRIDGE_MJS.contains("'thinking'"));
@@ -3163,6 +3423,7 @@ mod tests {
         assert!(BRIDGE_MJS.contains("const nextFlushChunk = (force = false)"));
         assert!(BRIDGE_MJS.contains("setTimeout(() => flush(false), streamFlushMs)"));
         assert!(BRIDGE_MJS.contains("buffer.length >= streamFlushChars"));
+        assert!(BRIDGE_MJS.contains("Anya commands: /new, /reset, /stop, /status, /auth, /login, /restart"));
     }
 
     #[test]
