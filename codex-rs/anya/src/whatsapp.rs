@@ -822,6 +822,10 @@ const deviceLoginTimeoutMs = parseTimeout(
   process.env.ANYA_WHATSAPP_DEVICE_LOGIN_TIMEOUT_MS,
   16 * 60 * 1000
 );
+const deviceLoginPromptTimeoutMs = parseTimeout(
+  process.env.ANYA_WHATSAPP_DEVICE_LOGIN_PROMPT_TIMEOUT_MS,
+  30_000
+);
 const authPreflightTtlMs = parseTimeout(
   process.env.ANYA_WHATSAPP_AUTH_PREFLIGHT_TTL_MS,
   5 * 60 * 1000
@@ -2420,14 +2424,15 @@ function deviceLoginPromptFromOutput(output) {
   const url = output.match(/https:\/\/auth\.openai\.com\/codex\/device\b/)?.[0];
   const code = output.match(/\b[A-Z0-9]{4}-[A-Z0-9]{4,8}\b/)?.[0];
   if (!url || !code) return null;
-  return [
-    'Anya needs a fresh Codex login.',
-    '',
-    `Open: ${url}`,
-    `Code: ${code}`,
-    '',
-    'I will wait here and restart the service after login succeeds.',
-  ].join('\n');
+  return { url, code };
+}
+
+async function sendDeviceLoginPrompt(sock, remoteJid, message, prompt) {
+  await replyText(sock, remoteJid, message, 'Anya needs a fresh Codex login. Open this URL:');
+  await replyText(sock, remoteJid, message, prompt.url);
+  await replyText(sock, remoteJid, message, 'Enter this code:');
+  await replyText(sock, remoteJid, message, prompt.code);
+  await replyText(sock, remoteJid, message, 'I will wait here and restart the service after login succeeds.');
 }
 
 function scheduleServiceRestart() {
@@ -2474,13 +2479,15 @@ async function runDeviceLoginFromWhatsapp(sock, remoteJid, message) {
 
   let output = '';
   let sentPrompt = false;
+  let promptTimer;
   let promptSend = Promise.resolve();
   const maybeSendPrompt = () => {
     if (sentPrompt) return;
     const prompt = deviceLoginPromptFromOutput(output);
     if (!prompt) return;
+    clearTimeout(promptTimer);
     sentPrompt = true;
-    promptSend = replyText(sock, remoteJid, message, prompt).catch((error) => {
+    promptSend = sendDeviceLoginPrompt(sock, remoteJid, message, prompt).catch((error) => {
       console.error(`Anya WhatsApp login prompt send failed: ${error?.stack || error?.message || error}`);
     });
   };
@@ -2493,21 +2500,31 @@ async function runDeviceLoginFromWhatsapp(sock, remoteJid, message) {
       let settled = false;
       let sentSignal = false;
       let killTimer;
+      const stopChild = () => {
+        if (child.exitCode !== null || sentSignal) return;
+        child.kill('SIGTERM');
+        sentSignal = true;
+        killTimer = setTimeout(() => {
+          if (child.exitCode === null) child.kill('SIGKILL');
+        }, 2_000);
+        killTimer.unref?.();
+      };
       const timeout = setTimeout(() => {
-        if (child.exitCode === null && !sentSignal) {
-          child.kill('SIGTERM');
-          sentSignal = true;
-          killTimer = setTimeout(() => {
-            if (child.exitCode === null) child.kill('SIGKILL');
-          }, 2_000);
-          killTimer.unref?.();
-        }
+        stopChild();
         if (!settled) {
           settled = true;
           reject(new Error('Device login timed out. Send /login to try again.'));
         }
       }, deviceLoginTimeoutMs);
       timeout.unref?.();
+      promptTimer = setTimeout(() => {
+        if (sentPrompt || settled) return;
+        stopChild();
+        settled = true;
+        clearTimeout(timeout);
+        reject(new Error('Device login started, but Anya could not read the OpenAI device URL and code from Codex output. I stopped the login attempt instead of hanging; send /login again after Anya is updated.'));
+      }, deviceLoginPromptTimeoutMs);
+      promptTimer.unref?.();
 
       const onData = (chunk) => {
         output += String(chunk);
@@ -2524,6 +2541,7 @@ async function runDeviceLoginFromWhatsapp(sock, remoteJid, message) {
         if (settled) return;
         settled = true;
         clearTimeout(timeout);
+        clearTimeout(promptTimer);
         clearTimeout(killTimer);
         reject(error);
       });
@@ -2531,6 +2549,7 @@ async function runDeviceLoginFromWhatsapp(sock, remoteJid, message) {
         if (settled) return;
         settled = true;
         clearTimeout(timeout);
+        clearTimeout(promptTimer);
         clearTimeout(killTimer);
         if (code === 0) {
           resolve();
@@ -3378,6 +3397,7 @@ mod tests {
     fn whatsapp_bridge_bounds_agent_runs() {
         assert!(BRIDGE_MJS.contains("ANYA_WHATSAPP_REPLY_TIMEOUT_MS"));
         assert!(BRIDGE_MJS.contains("ANYA_WHATSAPP_DEVICE_LOGIN_TIMEOUT_MS"));
+        assert!(BRIDGE_MJS.contains("ANYA_WHATSAPP_DEVICE_LOGIN_PROMPT_TIMEOUT_MS"));
         assert!(BRIDGE_MJS.contains("ANYA_WHATSAPP_AUTH_PREFLIGHT_TTL_MS"));
         assert!(BRIDGE_MJS.contains("ANYA_WHATSAPP_AUTH_PREFLIGHT_FAILURE_TTL_MS"));
         assert!(BRIDGE_MJS.contains("activeRuns = new Map()"));
@@ -3390,6 +3410,11 @@ mod tests {
         assert!(BRIDGE_MJS.contains("Anya needs a fresh Codex login"));
         assert!(BRIDGE_MJS.contains("Send /login in this WhatsApp chat"));
         assert!(BRIDGE_MJS.contains("function runDeviceLoginFromWhatsapp"));
+        assert!(BRIDGE_MJS.contains("function sendDeviceLoginPrompt"));
+        assert!(BRIDGE_MJS.contains("prompt.url"));
+        assert!(BRIDGE_MJS.contains("prompt.code"));
+        assert!(BRIDGE_MJS.contains("Enter this code:"));
+        assert!(BRIDGE_MJS.contains("could not read the OpenAI device URL and code"));
         assert!(BRIDGE_MJS.contains("[A-Z0-9]{4}-[A-Z0-9]{4,8}"));
         assert!(BRIDGE_MJS.contains("function scheduleServiceRestart"));
         assert!(BRIDGE_MJS.contains("systemd-run"));
