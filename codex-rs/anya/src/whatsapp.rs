@@ -2418,7 +2418,7 @@ async function replyText(sock, remoteJid, message, text, options = {}) {
 
 function deviceLoginPromptFromOutput(output) {
   const url = output.match(/https:\/\/auth\.openai\.com\/codex\/device\b/)?.[0];
-  const code = output.match(/\b[A-Z0-9]{4}-[A-Z0-9]{4}\b/)?.[0];
+  const code = output.match(/\b[A-Z0-9]{4}-[A-Z0-9]{4,8}\b/)?.[0];
   if (!url || !code) return null;
   return [
     'Anya needs a fresh Codex login.',
@@ -3390,6 +3390,7 @@ mod tests {
         assert!(BRIDGE_MJS.contains("Anya needs a fresh Codex login"));
         assert!(BRIDGE_MJS.contains("Send /login in this WhatsApp chat"));
         assert!(BRIDGE_MJS.contains("function runDeviceLoginFromWhatsapp"));
+        assert!(BRIDGE_MJS.contains("[A-Z0-9]{4}-[A-Z0-9]{4,8}"));
         assert!(BRIDGE_MJS.contains("function scheduleServiceRestart"));
         assert!(BRIDGE_MJS.contains("systemd-run"));
     }
